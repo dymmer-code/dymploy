@@ -65,3 +65,20 @@ func TestFakeProviderAsCloner(t *testing.T) {
 		t.Fatal("without a base directory the fake cannot clone")
 	}
 }
+
+func TestFakeResolvesReferences(t *testing.T) {
+	p := New("t").WithRefs(map[string]string{"acme/app:refs/heads/main": "aaaa", "acme/app:refs/tags/v1": "bbbb"})
+	ev, err := p.ResolveRef(context.Background(), "acme", "app", "main")
+	if err != nil || ev.Commit != "aaaa" || ev.Branch != "main" || ev.Ref != "refs/heads/main" || ev.FullName != "acme/app" {
+		t.Fatalf("%v %+v", err, ev)
+	}
+	if ev, err = p.ResolveRef(context.Background(), "acme", "app", "v1"); err != nil || ev.Tag != "v1" || ev.Commit != "bbbb" {
+		t.Fatalf("%v %+v", err, ev)
+	}
+	if ev, err = p.ResolveRef(context.Background(), "acme", "app", "refs/tags/v1"); err != nil || ev.Commit != "bbbb" {
+		t.Fatalf("%v %+v", err, ev)
+	}
+	if _, err = p.ResolveRef(context.Background(), "acme", "app", "nope"); !errors.Is(err, provider.ErrRefNotFound) {
+		t.Fatalf("%v", err)
+	}
+}

@@ -11,6 +11,7 @@ import (
 	"io"
 	"net/http"
 	"path/filepath"
+	"strings"
 
 	"github.com/dymmer-code/dymploy/internal/provider"
 )
@@ -19,6 +20,7 @@ import (
 type Provider struct {
 	token string
 	base  string // directory that hosts <owner>/<repo>.git, for the Cloner capability
+	refs  map[string]string
 }
 
 // New returns a provider that accepts requests carrying token.
@@ -55,6 +57,32 @@ func (p *Provider) ParseWebhook(r *http.Request) (*provider.Event, error) {
 		Owner: pl.Owner, Repo: pl.Repo, FullName: pl.Owner + "/" + pl.Repo,
 		Ref: pl.Ref, Branch: branch, Tag: tag, Commit: pl.Commit,
 	}, nil
+}
+
+// WithRefs returns a copy that resolves references: the keys are "owner/repo:refs/heads/main" (or
+// refs/tags/…) and the values the commits they point at.
+func (p *Provider) WithRefs(refs map[string]string) *Provider {
+	c := *p
+	c.refs = refs
+	return &c
+}
+
+// ResolveRef implements provider.Resolver.
+func (p *Provider) ResolveRef(_ context.Context, owner, repo, ref string) (*provider.Event, error) {
+	candidates := []string{ref}
+	if !strings.HasPrefix(ref, "refs/") {
+		candidates = []string{"refs/heads/" + ref, "refs/tags/" + ref}
+	}
+	for _, full := range candidates {
+		if commit, ok := p.refs[owner+"/"+repo+":"+full]; ok {
+			branch, tag := provider.SplitRef(full)
+			return &provider.Event{
+				Provider: "fake", Kind: provider.KindPush, Owner: owner, Repo: repo, FullName: owner + "/" + repo,
+				Ref: full, Branch: branch, Tag: tag, Commit: commit,
+			}, nil
+		}
+	}
+	return nil, fmt.Errorf("%w: %s in %s/%s", provider.ErrRefNotFound, ref, owner, repo)
 }
 
 // WithBase returns a copy that can "clone" repositories stored under base as <owner>/<repo>.git.

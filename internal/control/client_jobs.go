@@ -21,8 +21,12 @@ var ErrNoJobs = errors.New("this daemon does not offer job information")
 
 // call sends a request and decodes the answer; an error answer becomes an error with the daemon's words.
 func (c *Client) call(ctx context.Context, method, path string, out any) error {
+	return c.send(ctx, method, path, nil, out)
+}
+
+func (c *Client) send(ctx context.Context, method, path string, body []byte, out any) error {
 	var raw json.RawMessage
-	code, err := c.do(ctx, method, path, &raw)
+	code, err := c.doBody(ctx, method, path, body, &raw)
 	if err != nil {
 		return err
 	}
@@ -87,6 +91,14 @@ func (c *Client) Cancel(ctx context.Context, id string) (string, error) {
 	}
 	err := c.call(ctx, http.MethodPost, "/v1/jobs/"+url.PathEscape(id)+"/cancel", &out)
 	return out.Message, err
+}
+
+// Queue starts a job by hand and returns it.
+func (c *Client) Queue(ctx context.Context, repo, ref string) (job.Job, error) {
+	body, _ := json.Marshal(EnqueueRequest{Repo: repo, Ref: ref})
+	var j job.Job
+	err := c.send(ctx, http.MethodPost, "/v1/queue", body, &j)
+	return j, err
 }
 
 // Retry submits a copy of a finished job and returns it.

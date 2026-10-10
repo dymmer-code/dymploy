@@ -35,8 +35,15 @@ import (
 	"github.com/dymmer-code/dymploy/internal/checkout"
 	"github.com/dymmer-code/dymploy/internal/config"
 	"github.com/dymmer-code/dymploy/internal/control"
+	"github.com/dymmer-code/dymploy/internal/intake"
 	"github.com/dymmer-code/dymploy/internal/job"
+	"github.com/dymmer-code/dymploy/internal/provider"
+	fakeprovider "github.com/dymmer-code/dymploy/internal/provider/fake"
 	"github.com/dymmer-code/dymploy/internal/queue"
+	"github.com/dymmer-code/dymploy/internal/runner"
+	"github.com/dymmer-code/dymploy/internal/runner/dryrun"
+	"github.com/dymmer-code/dymploy/internal/runner/runnertest"
+	"github.com/dymmer-code/dymploy/internal/webhook"
 )
 
 func run(t *testing.T, ctx context.Context, args ...string) (stdout, stderr string, err error) {
@@ -1227,7 +1234,10 @@ func TestQueueErrorsBecomeConflicts(t *testing.T) {
 }
 
 // stubJobs is a control.Jobs for commands that need a job in a state the dry-run runner never leaves behind.
-type stubJobs struct{ cancelled []job.ID }
+type stubJobs struct {
+	cancelled []job.ID
+	queued    []control.EnqueueRequest
+}
 
 func (s *stubJobs) List(context.Context, job.Filter) ([]job.Job, error) {
 	code := 3
@@ -1251,6 +1261,10 @@ func (s *stubJobs) Cancel(_ context.Context, id job.ID) error {
 }
 func (s *stubJobs) Retry(context.Context, job.ID) (job.Job, error) {
 	return job.Job{}, nil
+}
+func (s *stubJobs) Enqueue(_ context.Context, r control.EnqueueRequest) (job.Job, error) {
+	s.queued = append(s.queued, r)
+	return job.Job{ID: "hand-1", Name: r.Repo, State: job.Queued}, nil
 }
 func (s *stubJobs) Subscribe() (<-chan control.Event, func()) {
 	ch := make(chan control.Event)
@@ -1282,5 +1296,200 @@ func TestJobCommandsFormatWhatTheDaemonSends(t *testing.T) {
 	out, _, err = run(t, ctx, "cancel", "x", "--socket", sock)
 	if err != nil || !strings.Contains(out, "cancelling x") || len(jobs.cancelled) != 1 {
 		t.Fatalf("%v %q", err, out)
+	}
+}
+
+// manualRig is a queue with the dry-run runner, a provider that knows some references and a receiver
+// whose policy is the one a webhook would meet.
+type manualRig struct {
+	jobs  queueJobs
+	rc    *webhook.Receiver
+	store *job.MemStore
+	logs  syncBuffer
+}
+
+func newManualRig(t *testing.T, providers map[string]provider.Provider) *manualRig {
+	t.Helper()
+	r := &manualRig{store: job.NewMemStore()}
+	reg := runner.NewRegistry()
+	reg.MustRegister("dryrun", dryrun.New())
+	log := slog.New(slog.NewTextHandler(&r.logs, nil))
+	mgr, err := queue.New(queue.Config{MaxConcurrent: 1, MaxPending: 5, OnBusy: queue.Policy("reject")},
+		queue.Deps{Store: r.store, Logs: job.NewMemLogs(), Runners: reg, Log: log})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := mgr.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { shutdownQueue(mgr) })
+	enq := intake.New(mgr, "dryrun", nil)
+	r.rc = &webhook.Receiver{
+		Providers: providers,
+		Policy:    webhook.Policy{Rules: []webhook.Rule{{Provider: "fake", Owner: "acme", Repositories: []string{"app"}, Branches: []string{"main"}, Tags: []string{"v*"}}}},
+		Queue:     enq, Dedupe: webhook.NewDedupe(time.Hour, 10), Log: log,
+	}
+	r.jobs = queueJobs{m: mgr, log: log, providers: providers, hooks: r.rc, enq: enq}
+	return r
+}
+
+func fakeProviders() map[string]provider.Provider {
+	return map[string]provider.Provider{"fake": fakeprovider.New("t").WithRefs(map[string]string{
+		"acme/app:refs/heads/main":    "0123456789abcdef0123456789abcdef01234567",
+		"acme/app:refs/heads/feature": "1123456789abcdef0123456789abcdef01234567",
+		"acme/app:refs/tags/v1":       "2123456789abcdef0123456789abcdef01234567",
+		"acme/other:refs/heads/main":  "3123456789abcdef0123456789abcdef01234567",
+	})}
+}
+
+func TestAJobStartedByHandMeetsTheSamePolicyAsAWebhook(t *testing.T) {
+	r := newManualRig(t, fakeProviders())
+	ctx := context.Background()
+	j, err := r.jobs.Enqueue(ctx, control.EnqueueRequest{Repo: "fake/acme/app", Ref: "main"})
+	if err != nil || j.Name != "fake/acme/app" || j.ID == "" {
+		t.Fatalf("%v %+v", err, j)
+	}
+	var in provider.Event
+	if err := json.Unmarshal(j.Input, &in); err != nil || in.Commit != "0123456789abcdef0123456789abcdef01234567" || in.Branch != "main" || in.DeliveryID != "" {
+		t.Fatalf("the job carries the event a push would have: %v %+v", err, in)
+	}
+	waitFor(t, func() bool { got, _ := r.store.Get(ctx, j.ID); return got.State.Final() })
+	if !strings.Contains(r.logs.String(), "job started by hand") {
+		t.Fatalf("audit line missing:\n%s", r.logs.String())
+	}
+	// a tag the policy allows, with the provider left out (there is only one)
+	if _, err := r.jobs.Enqueue(ctx, control.EnqueueRequest{Repo: "acme/app", Ref: "v1"}); err != nil {
+		t.Fatalf("%v", err)
+	}
+	waitFor(t, func() bool {
+		l, _ := r.store.List(ctx, job.Filter{})
+		return len(l) == 2 && l[0].State.Final() && l[1].State.Final()
+	})
+
+	// not allowed: a branch outside the rules, another repository
+	for _, tc := range []struct{ repo, ref string }{{"fake/acme/app", "feature"}, {"fake/acme/other", "main"}} {
+		_, err := r.jobs.Enqueue(ctx, control.EnqueueRequest{Repo: tc.repo, Ref: tc.ref})
+		if !errors.Is(err, control.ErrForbidden) || !strings.Contains(err.Error(), "policy does not allow") {
+			t.Errorf("%+v: %v", tc, err)
+		}
+	}
+	if !strings.Contains(r.logs.String(), "manual job refused by the policy") {
+		t.Fatal("refusals are audited")
+	}
+	// the policy in force is the receiver's current one: a reload applies to manual jobs at once
+	r.rc.SetPolicy(webhook.Policy{})
+	if _, err := r.jobs.Enqueue(ctx, control.EnqueueRequest{Repo: "fake/acme/app", Ref: "main"}); !errors.Is(err, control.ErrForbidden) {
+		t.Fatalf("%v", err)
+	}
+}
+
+func TestStartingAJobByHandReportsWhatIsWrong(t *testing.T) {
+	r := newManualRig(t, fakeProviders())
+	ctx := context.Background()
+	for name, tc := range map[string]struct {
+		repo, ref, want string
+	}{
+		"no provider part":  {"app", "main", "provider/owner/repo"},
+		"too many parts":    {"fake/acme/app/x", "main", "provider/owner/repo"},
+		"empty owner":       {"fake//app", "main", "incomplete"},
+		"unknown provider":  {"gitlab/acme/app", "main", "unknown provider"},
+		"unknown reference": {"fake/acme/app", "nope", "no such branch or tag"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := r.jobs.Enqueue(ctx, control.EnqueueRequest{Repo: tc.repo, Ref: tc.ref})
+			if !errors.Is(err, control.ErrInvalid) || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("%v", err)
+			}
+		})
+	}
+	// a provider that cannot resolve references
+	r.jobs.providers = map[string]provider.Provider{"fake": noResolver{}}
+	if _, err := r.jobs.Enqueue(ctx, control.EnqueueRequest{Repo: "fake/acme/app", Ref: "main"}); !errors.Is(err, control.ErrInvalid) || !strings.Contains(err.Error(), "cannot resolve") {
+		t.Fatalf("%v", err)
+	}
+	// resolver failures that are not "no such reference" pass through
+	r.jobs.providers = map[string]provider.Provider{"fake": brokenResolver{}}
+	if _, err := r.jobs.Enqueue(ctx, control.EnqueueRequest{Repo: "fake/acme/app", Ref: "main"}); err == nil || errors.Is(err, control.ErrInvalid) {
+		t.Fatalf("%v", err)
+	}
+	// without a receiver there is no policy, so nothing is allowed
+	r.jobs.providers, r.jobs.hooks = fakeProviders(), nil
+	if _, err := r.jobs.Enqueue(ctx, control.EnqueueRequest{Repo: "fake/acme/app", Ref: "main"}); !errors.Is(err, control.ErrForbidden) {
+		t.Fatalf("%v", err)
+	}
+}
+
+func TestAJobStartedByHandObeysTheQueueRules(t *testing.T) {
+	r := newManualRig(t, fakeProviders())
+	ctx := context.Background()
+	// the runner is held up so that the first job is still there for the second
+	gate := runnertest.NewGate()
+	r.jobs.providers = fakeProviders()
+	reg := runner.NewRegistry()
+	reg.MustRegister("hold", runnertest.New(runnertest.Hold(gate, 0)))
+	mgr, _ := queue.New(queue.Config{MaxConcurrent: 1, MaxPending: 5, OnBusy: queue.Policy("reject")},
+		queue.Deps{Store: job.NewMemStore(), Logs: job.NewMemLogs(), Runners: reg, Log: slog.New(slog.NewTextHandler(io.Discard, nil))})
+	mgr.Start(ctx)
+	defer func() { gate.Open(); shutdownQueue(mgr) }()
+	r.jobs.m, r.jobs.enq = mgr, intake.New(mgr, "hold", nil)
+	if _, err := r.jobs.Enqueue(ctx, control.EnqueueRequest{Repo: "fake/acme/app", Ref: "main"}); err != nil {
+		t.Fatal(err)
+	}
+	_, err := r.jobs.Enqueue(ctx, control.EnqueueRequest{Repo: "fake/acme/app", Ref: "main"})
+	if !errors.Is(err, control.ErrConflict) || !strings.Contains(err.Error(), "already waiting or running") {
+		t.Fatalf("on_busy: reject is a conflict, as it is for a webhook: %v", err)
+	}
+}
+
+type noResolver struct{}
+
+func (noResolver) Name() string { return "fake" }
+func (noResolver) ParseWebhook(*http.Request) (*provider.Event, error) {
+	return nil, provider.ErrIgnored
+}
+
+type brokenResolver struct{ noResolver }
+
+func (brokenResolver) ResolveRef(context.Context, string, string, string) (*provider.Event, error) {
+	return nil, errors.New("GitHub is down")
+}
+
+func TestQueueCommand(t *testing.T) {
+	sock := filepath.Join(tmpDir(t), "c.sock")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	jobs := &stubJobs{}
+	ready := make(chan struct{})
+	go control.Serve(ctx, sock, control.Handlers{Status: func() control.Status { return control.Status{} }, Jobs: jobs}, func() { close(ready) })
+	<-ready
+
+	out, _, err := run(t, ctx, "queue", "github/acme/app", "--ref", "main", "--socket", sock)
+	if err != nil || !strings.Contains(out, "queued hand-1 (github/acme/app at main)") || len(jobs.queued) != 1 || jobs.queued[0].Ref != "main" {
+		t.Fatalf("%v %q %+v", err, out, jobs.queued)
+	}
+	out, _, err = run(t, ctx, "queue", "--socket", sock)
+	if err != nil || !strings.Contains(out, "running") {
+		t.Fatalf("without arguments it lists what is waiting and running: %v %q", err, out)
+	}
+	if _, _, err := run(t, ctx, "queue", "github/acme/app", "--socket", sock); err == nil || !strings.Contains(err.Error(), "--ref is required") {
+		t.Fatalf("%v", err)
+	}
+	if _, _, err := run(t, ctx, "queue", "--ref", "main", "--socket", sock); err == nil || !strings.Contains(err.Error(), "say which repository") {
+		t.Fatalf("%v", err)
+	}
+	if _, _, err := run(t, ctx, "queue", "a", "b", "--socket", sock); err == nil {
+		t.Fatal("at most one repository")
+	}
+	fctx, fcancel := context.WithTimeout(ctx, 5*time.Second)
+	defer fcancel()
+	// following a job the stub knows nothing about ends with the daemon's answer, not a hang
+	if _, _, err := run(t, fctx, "queue", "github/acme/app", "--ref", "main", "-f", "--socket", sock); err != nil && !strings.Contains(err.Error(), "not found") && fctx.Err() == nil {
+		t.Logf("follow: %v", err)
+	}
+	if _, _, err := run(t, ctx, "queue", "x", "--ref", "m", "--socket", filepath.Join(tmpDir(t), "none.sock")); err == nil || !strings.Contains(err.Error(), "cannot reach the daemon") {
+		t.Fatalf("%v", err)
+	}
+	if _, _, err := run(t, ctx, "queue", "--config", filepath.Join(tmpDir(t), "broken.yaml")); err == nil {
+		t.Log("a missing configuration falls back to the default socket")
 	}
 }

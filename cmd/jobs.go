@@ -13,14 +13,22 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/dymmer-code/dymploy/internal/control"
+	"github.com/dymmer-code/dymploy/internal/intake"
 	"github.com/dymmer-code/dymploy/internal/job"
+	"github.com/dymmer-code/dymploy/internal/provider"
 	"github.com/dymmer-code/dymploy/internal/queue"
+	"github.com/dymmer-code/dymploy/internal/webhook"
 )
 
 // queueJobs adapts the queue to the small interface of the control package, which must not depend on it.
 type queueJobs struct {
 	m   *queue.Manager
 	log *slog.Logger
+	// What starting a job by hand needs: the providers (to resolve a reference), the receiver (for its
+	// policy, which applies exactly as it does to a webhook) and the intake that makes the job.
+	providers map[string]provider.Provider
+	hooks     *webhook.Receiver
+	enq       *intake.Enqueuer
 }
 
 func (q queueJobs) List(ctx context.Context, f job.Filter) ([]job.Job, error) {
@@ -50,6 +58,58 @@ func (q queueJobs) Retry(ctx context.Context, id job.ID) (job.Job, error) {
 	j, err := q.m.Retry(ctx, id)
 	q.log.Info("audit: retry requested through the control socket", "job", id, "new_job", j.ID, "ok", err == nil)
 	return j, conflict(err)
+}
+
+// Enqueue starts a job by hand. It is not a way around anything: the reference is resolved by the
+// provider and the resulting event must pass the same policy as a webhook would.
+func (q queueJobs) Enqueue(ctx context.Context, r control.EnqueueRequest) (job.Job, error) {
+	name, owner, repo, err := q.splitRepo(r.Repo)
+	if err != nil {
+		return job.Job{}, err
+	}
+	res, ok := q.providers[name].(provider.Resolver)
+	if !ok {
+		return job.Job{}, fmt.Errorf("%w: provider %q cannot resolve references", control.ErrInvalid, name)
+	}
+	ev, err := res.ResolveRef(ctx, owner, repo, r.Ref)
+	if err != nil {
+		if errors.Is(err, provider.ErrRefNotFound) {
+			return job.Job{}, fmt.Errorf("%w: %s", control.ErrInvalid, err)
+		}
+		return job.Job{}, err
+	}
+	if q.hooks == nil {
+		return job.Job{}, fmt.Errorf("%w: no policy is configured", control.ErrForbidden)
+	}
+	if allowed, why := q.hooks.Allowed(ev); !allowed {
+		q.log.Warn("audit: manual job refused by the policy", "repo", ev.FullName, "ref", ev.Ref, "reason", why)
+		return job.Job{}, fmt.Errorf("%w: the policy does not allow it (%s)", control.ErrForbidden, why)
+	}
+	j, err := q.enq.Submit(ctx, *ev)
+	q.log.Info("audit: job started by hand through the control socket", "repo", ev.FullName, "ref", ev.Ref, "commit", ev.Commit, "job", j.ID, "ok", err == nil)
+	return j, conflict(err)
+}
+
+// splitRepo reads provider/owner/repo; owner/repo is enough when there is only one provider.
+func (q queueJobs) splitRepo(s string) (name, owner, repo string, err error) {
+	parts := strings.Split(s, "/")
+	switch {
+	case len(parts) == 3:
+		name, owner, repo = parts[0], parts[1], parts[2]
+	case len(parts) == 2 && len(q.providers) == 1:
+		for name = range q.providers {
+		}
+		owner, repo = parts[0], parts[1]
+	default:
+		return "", "", "", fmt.Errorf("%w: write the repository as provider/owner/repo (for example github/acme/shop)", control.ErrInvalid)
+	}
+	if _, ok := q.providers[name]; !ok {
+		return "", "", "", fmt.Errorf("%w: unknown provider %q", control.ErrInvalid, name)
+	}
+	if owner == "" || repo == "" {
+		return "", "", "", fmt.Errorf("%w: the repository %q is incomplete", control.ErrInvalid, s)
+	}
+	return name, owner, repo, nil
 }
 
 func (q queueJobs) Subscribe() (<-chan control.Event, func()) {
@@ -341,5 +401,62 @@ func newWatchCmd() *cobra.Command {
 	}
 	socketFlags(c, &configPath, &socket)
 	c.Flags().BoolVar(&asJSON, "json", false, "print one JSON message per line")
+	return c
+}
+
+func newQueueCmd() *cobra.Command {
+	var configPath, socket, ref string
+	var follow bool
+	c := &cobra.Command{
+		Use:   "queue [provider/owner/repo --ref <branch-or-tag>]",
+		Short: "Start a job by hand, or show what is waiting and running",
+		Long: `With a repository and a reference, resolves the reference to its commit, applies the same policy as a
+webhook and queues the job (it obeys the queue's rules: one job per repository, on_busy, limits).
+Without arguments it shows what is waiting and running now.`,
+		Args: cobra.MaximumNArgs(1),
+		RunE: func(c *cobra.Command, args []string) error {
+			cl, err := clientFor(socket, configPath)
+			if err != nil {
+				return err
+			}
+			out := c.OutOrStdout()
+			if len(args) == 0 {
+				if ref != "" || follow {
+					return errors.New("say which repository: dymploy queue provider/owner/repo --ref main")
+				}
+				jobs, err := cl.Jobs(c.Context(), job.Filter{States: []job.State{job.Queued, job.Running}})
+				if err != nil {
+					return err
+				}
+				if len(jobs) == 0 {
+					fmt.Fprintln(out, "nothing waiting or running")
+				}
+				for _, j := range jobs {
+					fmt.Fprintln(out, jobLine(j))
+				}
+				return nil
+			}
+			if ref == "" {
+				return errors.New("--ref is required: a branch or a tag (for example --ref main)")
+			}
+			j, err := cl.Queue(c.Context(), args[0], ref)
+			if err != nil {
+				return err
+			}
+			fmt.Fprintf(out, "queued %s (%s at %s)\n", j.ID, j.Name, ref)
+			if !follow {
+				return nil
+			}
+			return cl.Watch(c.Context(), string(j.ID), 0, func(m control.Message) error {
+				if m.Type == "output" && m.Entry != nil {
+					fmt.Fprintln(out, entryLine(*m.Entry))
+				}
+				return nil
+			})
+		},
+	}
+	socketFlags(c, &configPath, &socket)
+	c.Flags().StringVar(&ref, "ref", "", "branch or tag to build (or a full refs/heads/… / refs/tags/…)")
+	c.Flags().BoolVarP(&follow, "follow", "f", false, "follow the job's log until it ends")
 	return c
 }

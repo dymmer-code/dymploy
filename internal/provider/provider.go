@@ -80,6 +80,17 @@ const (
 	StateFailure State = "failure"
 )
 
+// ErrRefNotFound is returned by a Resolver when the branch or tag does not exist.
+var ErrRefNotFound = errors.New("no such branch or tag")
+
+// Resolver is implemented by providers that can turn a branch or tag name into the commit it points
+// at, which is what starting a job by hand needs. ref is a short name (a branch is tried before a tag)
+// or a full reference (refs/heads/x, refs/tags/x). The event it returns is what a push of that commit
+// would have been, except that it has no delivery id.
+type Resolver interface {
+	ResolveRef(ctx context.Context, owner, repo, ref string) (*Event, error)
+}
+
 // StatusPublisher is implemented by providers that can show a job's state on the commit.
 type StatusPublisher interface {
 	PublishStatus(ctx context.Context, ev *Event, state State, description, targetURL string) error

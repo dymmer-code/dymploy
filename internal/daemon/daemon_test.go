@@ -142,7 +142,10 @@ func (noJobs) Get(context.Context, job.ID) (job.Job, error)   { return job.Job{}
 func (noJobs) Logs(job.ID, int64, int) ([]job.Entry, error)   { return nil, nil }
 func (noJobs) Cancel(context.Context, job.ID) error           { return nil }
 func (noJobs) Retry(context.Context, job.ID) (job.Job, error) { return job.Job{}, nil }
-func (noJobs) Subscribe() (<-chan control.Event, func())      { return make(chan control.Event), func() {} }
+func (noJobs) Enqueue(context.Context, control.EnqueueRequest) (job.Job, error) {
+	return job.Job{}, nil
+}
+func (noJobs) Subscribe() (<-chan control.Event, func()) { return make(chan control.Event), func() {} }
 
 func TestJobsAndReloadAreOfferedOnTheControlSocket(t *testing.T) {
 	cfg := testConfig(t)

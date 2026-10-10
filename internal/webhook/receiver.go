@@ -43,6 +43,10 @@ type Receiver struct {
 // the receiver is serving.
 func (rc *Receiver) SetPolicy(p Policy) { rc.current.Store(&p) }
 
+// Allowed says whether an event passes the current policy, with the reason when it does not. Jobs
+// started by hand go through it too: they are no way around the policy.
+func (rc *Receiver) Allowed(ev *provider.Event) (bool, string) { return rc.policy().Allow(ev) }
+
 func (rc *Receiver) policy() Policy {
 	if p := rc.current.Load(); p != nil {
 		return *p

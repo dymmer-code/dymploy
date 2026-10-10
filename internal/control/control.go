@@ -3,10 +3,12 @@
 package control
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -84,7 +86,7 @@ func Serve(ctx context.Context, path string, h Handlers, ready func()) error {
 	})
 	if h.Jobs != nil {
 		api := (&API{Jobs: h.Jobs, MaxStreams: 64}).Handler()
-		for _, p := range []string{"/v1/jobs", "/v1/jobs/", "/v1/events"} {
+		for _, p := range []string{"/v1/jobs", "/v1/jobs/", "/v1/events", "/v1/queue"} {
 			mux.Handle(p, api)
 		}
 	}
@@ -159,6 +161,10 @@ func (c *Client) get(ctx context.Context, path string, out any) error {
 
 // do calls the daemon and decodes the JSON answer, whatever the status; it returns the status.
 func (c *Client) do(ctx context.Context, method, path string, out any) (int, error) {
+	return c.doBody(ctx, method, path, nil, out)
+}
+
+func (c *Client) doBody(ctx context.Context, method, path string, body []byte, out any) (int, error) {
 	hc := &http.Client{
 		Timeout: 10 * time.Second,
 		Transport: &http.Transport{
@@ -167,9 +173,16 @@ func (c *Client) do(ctx context.Context, method, path string, out any) (int, err
 			},
 		},
 	}
-	req, err := http.NewRequestWithContext(ctx, method, "http://dymploy"+path, nil)
+	var rd io.Reader
+	if body != nil {
+		rd = bytes.NewReader(body)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, "http://dymploy"+path, rd)
 	if err != nil {
 		return 0, err
+	}
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
 	}
 	resp, err := hc.Do(req)
 	if err != nil {

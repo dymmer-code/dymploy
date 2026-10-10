@@ -250,7 +250,15 @@ dymploy logs <id> [-f]           # -f follows until the job ends (lines: "#" dym
 dymploy cancel <id>              # a waiting job never runs; a running one is stopped
 dymploy retry <id>               # a finished job again, as a new job
 dymploy watch [--json]           # everything, live: what is waiting or running, then every change and log line
+dymploy queue github/owner/repo --ref main [-f]   # start a job by hand (a branch or a tag); -f follows its log
+dymploy queue                    # without arguments: what is waiting and running now
 ```
+
+`dymploy queue` is not a way around anything. The provider resolves the branch or tag to its commit (a branch is tried before a
+tag; `refs/heads/…` and `refs/tags/…` are accepted), the event must pass **the same `policy` as a webhook** (and so a reload applies
+to it at once), and the job obeys the queue's rules (`on_busy`, one job per repository, `max_pending`). It works only through
+the control socket, never through the public API, and is written to the audit log. For GitHub it needs the App
+(`app_id`/`private_key_file`) installed on the repository.
 
 The API behind those commands is `GET /v1/jobs`, `/v1/jobs/{id}`, `/v1/jobs/{id}/logs?after=&limit=`, `POST /v1/jobs/{id}/cancel`
 and `/retry`, and the live channel `GET /v1/events` (a WebSocket). The channel starts with a `snapshot` of the jobs waiting or

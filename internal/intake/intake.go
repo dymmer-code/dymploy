@@ -35,13 +35,7 @@ func New(sub Submitter, kind string, params json.RawMessage) *Enqueuer {
 // Enqueue implements webhook.Enqueuer. Jobs are named after the repository, so two pushes to the
 // same repository never run at the same time. The whole event travels as the job's opaque input.
 func (e *Enqueuer) Enqueue(ctx context.Context, ev provider.Event) error {
-	input, err := json.Marshal(ev)
-	if err != nil {
-		return err
-	}
-	_, err = e.sub.Submit(ctx, queue.Request{
-		Name: ev.Provider + "/" + ev.FullName, Kind: e.kind, Params: e.params, Input: input,
-	})
+	_, err := e.Submit(ctx, ev)
 	switch {
 	case errors.Is(err, queue.ErrQueueFull):
 		return webhook.ErrQueueFull
@@ -49,4 +43,15 @@ func (e *Enqueuer) Enqueue(ctx context.Context, ev provider.Event) error {
 		return webhook.ErrDropped
 	}
 	return err
+}
+
+// Submit is Enqueue for callers that want the job back and the queue's own errors.
+func (e *Enqueuer) Submit(ctx context.Context, ev provider.Event) (job.Job, error) {
+	input, err := json.Marshal(ev)
+	if err != nil {
+		return job.Job{}, err
+	}
+	return e.sub.Submit(ctx, queue.Request{
+		Name: ev.Provider + "/" + ev.FullName, Kind: e.kind, Params: e.params, Input: input,
+	})
 }

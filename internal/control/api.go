@@ -32,11 +32,28 @@ type Jobs interface {
 	Logs(id job.ID, after int64, limit int) ([]job.Entry, error)
 	Cancel(ctx context.Context, id job.ID) error
 	Retry(ctx context.Context, id job.ID) (job.Job, error)
+	// Enqueue starts a job by hand: it resolves the reference, applies the same policy as a webhook and
+	// queues the job. ErrInvalid and ErrForbidden say why it could not.
+	Enqueue(ctx context.Context, r EnqueueRequest) (job.Job, error)
 	// Subscribe returns a channel of events and a function that ends the subscription. A subscriber
 	// that cannot keep up loses events: output events carry their sequence number so that it can
 	// notice and read the log again.
 	Subscribe() (<-chan Event, func())
 }
+
+// EnqueueRequest asks for a job by hand.
+type EnqueueRequest struct {
+	// Repo is provider/owner/repository; the provider may be left out when the daemon has only one.
+	Repo string `json:"repo"`
+	// Ref is a branch or tag name, or a full reference.
+	Ref string `json:"ref"`
+}
+
+// Errors of Enqueue. The API answers 400 and 403.
+var (
+	ErrInvalid   = errors.New("invalid request")
+	ErrForbidden = errors.New("forbidden")
+)
 
 // ErrConflict is what Jobs methods return when the request makes no sense in the job's state (for
 // example cancelling a finished job). The API answers 409.
@@ -75,6 +92,7 @@ func (a *API) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/jobs/{id}/logs", a.logs)
 	mux.HandleFunc("GET /v1/events", a.events)
 	if !a.ReadOnly {
+		mux.HandleFunc("POST /v1/queue", a.enqueue)
 		mux.HandleFunc("POST /v1/jobs/{id}/cancel", a.cancel)
 		mux.HandleFunc("POST /v1/jobs/{id}/retry", a.retry)
 	}
@@ -98,6 +116,10 @@ func fail(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, job.ErrNotFound):
 		reply(w, http.StatusNotFound, map[string]string{"error": "job not found"})
+	case errors.Is(err, ErrInvalid):
+		reply(w, http.StatusBadRequest, map[string]string{"error": strings.TrimPrefix(err.Error(), ErrInvalid.Error()+": ")})
+	case errors.Is(err, ErrForbidden):
+		reply(w, http.StatusForbidden, map[string]string{"error": strings.TrimPrefix(err.Error(), ErrForbidden.Error()+": ")})
 	case errors.Is(err, ErrConflict):
 		reply(w, http.StatusConflict, map[string]string{"error": strings.TrimPrefix(err.Error(), ErrConflict.Error()+": ")})
 	default:
@@ -198,6 +220,22 @@ func (a *API) cancel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	reply(w, http.StatusOK, map[string]string{"message": "cancelling " + string(id)})
+}
+
+func (a *API) enqueue(w http.ResponseWriter, r *http.Request) {
+	var req EnqueueRequest
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4<<10))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&req); err != nil || req.Repo == "" || req.Ref == "" {
+		reply(w, http.StatusBadRequest, map[string]string{"error": "send {\"repo\": \"provider/owner/repository\", \"ref\": \"branch or tag\"}"})
+		return
+	}
+	j, err := a.Jobs.Enqueue(r.Context(), req)
+	if err != nil {
+		fail(w, err)
+		return
+	}
+	reply(w, http.StatusAccepted, public(j))
 }
 
 func (a *API) retry(w http.ResponseWriter, r *http.Request) {

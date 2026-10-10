@@ -265,3 +265,20 @@ func TestReplacingThePolicyAppliesToTheNextEvents(t *testing.T) {
 		t.Fatalf("an empty policy builds nothing: %d", w.Code)
 	}
 }
+
+func TestAllowedAnswersWithTheCurrentPolicy(t *testing.T) {
+	f := newFixture(t)
+	ev := &provider.Event{Provider: "fake", Owner: "acme", Repo: "app", Branch: "main", Ref: "refs/heads/main"}
+	if ok, why := f.rc.Allowed(ev); !ok || why != "" {
+		t.Fatalf("%v %q", ok, why)
+	}
+	other := *ev
+	other.Branch = "feature/x"
+	if ok, why := f.rc.Allowed(&other); ok || why == "" {
+		t.Fatalf("a refusal says why: %v %q", ok, why)
+	}
+	f.rc.SetPolicy(Policy{})
+	if ok, _ := f.rc.Allowed(ev); ok {
+		t.Fatal("the replaced policy applies to manual jobs too")
+	}
+}

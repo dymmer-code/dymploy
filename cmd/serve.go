@@ -79,11 +79,13 @@ func newServeCmd(version string) *cobra.Command {
 				go cleanArtifacts(pruneCtx, filepath.Join(cfg.DataDir, "artifacts"), time.Duration(cfg.ArtifactKeepDays)*24*time.Hour, log)
 			}
 
-			hooks := buildReceiver(cfg, log, providers, intake.New(mgr, cfg.Runner.Kind, cfg.Runner.ParamsJSON()))
+			enq := intake.New(mgr, cfg.Runner.Kind, cfg.Runner.ParamsJSON())
+			hooks := buildReceiver(cfg, log, providers, enq)
+			jobs := queueJobs{m: mgr, log: log, providers: providers, hooks: hooks, enq: enq}
 			rl := &reloader{path: configPath, cur: cfg, hooks: hooks, remote: remote, targets: targets, log: log}
 			reloadOnSIGHUP(ctx, rl)
-			d := daemon.New(cfg, version).OnReload(rl.Reload).WithJobs(queueJobs{mgr, log})
-			if err := mountAPI(d, cfg, queueJobs{mgr, log}, log); err != nil {
+			d := daemon.New(cfg, version).OnReload(rl.Reload).WithJobs(jobs)
+			if err := mountAPI(d, cfg, jobs, log); err != nil {
 				return err
 			}
 			if hooks != nil {

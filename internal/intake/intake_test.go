@@ -60,3 +60,15 @@ func TestQueueErrorsAreTranslatedForTheWebhookLayer(t *testing.T) {
 		t.Fatalf("anything else passes through: %v", err)
 	}
 }
+
+func TestSubmitReturnsTheJobAndTheQueuesOwnErrors(t *testing.T) {
+	s := &submitter{}
+	j, err := New(s, "docker", nil).Submit(context.Background(), ev)
+	if err != nil || j.ID != "j1" || s.got.Name != "github/acme/shop" {
+		t.Fatalf("%v %+v", err, j)
+	}
+	s.err = queue.ErrRejected
+	if _, err := New(s, "docker", nil).Submit(context.Background(), ev); !errors.Is(err, queue.ErrRejected) {
+		t.Fatalf("callers that start jobs by hand get the queue's errors, not the webhook's: %v", err)
+	}
+}

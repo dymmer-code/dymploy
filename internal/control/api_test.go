@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -111,7 +112,7 @@ func (f *fakeJobs) Cancel(_ context.Context, id job.ID) error {
 	case !ok:
 		return job.ErrNotFound
 	case j.State.Final():
-		return errors.New(ErrConflict.Error() + ": the job has already finished")
+		return fmt.Errorf("%w: the job has already finished", ErrConflict)
 	}
 	f.cancels = append(f.cancels, id)
 	return nil
@@ -125,9 +126,25 @@ func (f *fakeJobs) Retry(_ context.Context, id job.ID) (job.Job, error) {
 	case !ok:
 		return job.Job{}, job.ErrNotFound
 	case !j.State.Final():
-		return job.Job{}, errors.New(ErrConflict.Error() + ": only a finished job can be retried")
+		return job.Job{}, fmt.Errorf("%w: only a finished job can be retried", ErrConflict)
 	}
 	n := job.Job{ID: id + "-r", Name: j.Name, Kind: j.Kind, State: job.Queued, RetryOf: id, Params: j.Params, Input: j.Input}
+	f.add(n)
+	return n, nil
+}
+
+func (f *fakeJobs) Enqueue(_ context.Context, r EnqueueRequest) (job.Job, error) {
+	switch r.Repo {
+	case "bad":
+		return job.Job{}, fmt.Errorf("%w: write the repository as provider/owner/repo", ErrInvalid)
+	case "denied":
+		return job.Job{}, fmt.Errorf("%w: the policy does not allow it", ErrForbidden)
+	case "busy":
+		return job.Job{}, fmt.Errorf("%w: a job with this name is already waiting or running", ErrConflict)
+	case "broken":
+		return job.Job{}, errors.New("disk on fire")
+	}
+	n := job.Job{ID: "manual-1", Name: r.Repo, State: job.Queued, Input: json.RawMessage(`{"commit":"x"}`)}
 	f.add(n)
 	return n, nil
 }
@@ -520,5 +537,64 @@ func TestOnlyTheListedWebOriginsMayOpenTheChannel(t *testing.T) {
 	}
 	if _, resp, err := websocket.Dial(ctx, url, hdr("https://evil.example")); err == nil || resp == nil || resp.StatusCode != 403 {
 		t.Fatalf("another origin must be refused: %v %v", err, resp)
+	}
+}
+
+func TestStartingAJobByHand(t *testing.T) {
+	f, c := withJobs(t)
+	ctx := context.Background()
+	j, err := c.Queue(ctx, "github/acme/app", "main")
+	if err != nil || j.ID != "manual-1" || j.State != job.Queued || j.Input != nil {
+		t.Fatalf("%v %+v", err, j)
+	}
+	if got, _ := f.Get(ctx, "manual-1"); got.Name != "github/acme/app" {
+		t.Fatalf("%+v", got)
+	}
+	for repo, want := range map[string]string{
+		"bad":    "write the repository as provider/owner/repo",
+		"denied": "the policy does not allow it",
+		"busy":   "already waiting or running",
+		"broken": "disk on fire",
+	} {
+		if _, err := c.Queue(ctx, repo, "main"); err == nil || !strings.Contains(err.Error(), want) || strings.Contains(err.Error(), "invalid request:") || strings.Contains(err.Error(), "forbidden:") {
+			t.Errorf("%s: %v", repo, err)
+		}
+	}
+}
+
+func TestTheQueueEndpointsStatusCodesAndInput(t *testing.T) {
+	f := newFake()
+	srv := httptest.NewServer((&API{Jobs: f}).Handler())
+	defer srv.Close()
+	post := func(body string) int {
+		resp, err := http.Post(srv.URL+"/v1/queue", "application/json", strings.NewReader(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		return resp.StatusCode
+	}
+	for body, want := range map[string]int{
+		`{"repo":"github/a/b","ref":"main"}`:       202,
+		`{"repo":"bad","ref":"main"}`:              400,
+		`{"repo":"denied","ref":"main"}`:           403,
+		`{"repo":"busy","ref":"main"}`:             409,
+		`{"repo":"broken","ref":"main"}`:           500,
+		`{"repo":"github/a/b"}`:                    400,
+		`{"ref":"main"}`:                           400,
+		`{"repo":"github/a/b","ref":"main","x":1}`: 400,
+		`not json`: 400,
+		`{"repo":"` + strings.Repeat("a", 5000) + `","ref":"main"}`: 400,
+	} {
+		if got := post(body); got != want {
+			t.Errorf("%.60s → %d, want %d", body, got, want)
+		}
+	}
+	ro := httptest.NewServer((&API{Jobs: f, ReadOnly: true}).Handler())
+	defer ro.Close()
+	resp, _ := http.Post(ro.URL+"/v1/queue", "application/json", strings.NewReader(`{"repo":"github/a/b","ref":"main"}`))
+	resp.Body.Close()
+	if resp.StatusCode == 202 {
+		t.Fatal("the public API cannot start jobs")
 	}
 }
