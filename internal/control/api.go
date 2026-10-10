@@ -339,13 +339,17 @@ func (a *API) events(w http.ResponseWriter, r *http.Request) {
 }
 
 // RequireToken wraps h so that only requests carrying `Authorization: Bearer <token>` get through.
-// The comparison takes the same time whatever the guess.
-func RequireToken(token string, h http.Handler) http.Handler {
+// The comparison takes the same time whatever the guess. denied, if not nil, is told about every
+// refused request (for the audit log).
+func RequireToken(token string, h http.Handler, denied func(*http.Request)) http.Handler {
 	want := sha256.Sum256([]byte(token))
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		got, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
 		sum := sha256.Sum256([]byte(got))
 		if !ok || subtle.ConstantTimeCompare(sum[:], want[:]) != 1 {
+			if denied != nil {
+				denied(r)
+			}
 			w.Header().Set("WWW-Authenticate", `Bearer realm="dymploy"`)
 			reply(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
 			return

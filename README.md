@@ -174,13 +174,29 @@ whole chain be checked without side effects; `clone` checks out the commit; `doc
 `runner.kind: docker` clones the commit like `clone`, reads `dymploy.yaml` from it (see `dymploy validate`),
 runs each `build.steps` entry in its own container and packs `artifact` into
 `<data_dir>/artifacts/<job id>/<name>.tar.gz`, logging its size and SHA-256. It needs the `docker` command and
-a reachable engine (checked at every job, so Docker can be started after dymploy). `params` are the same as `clone`'s.
+a reachable engine (checked at every job, so Docker can be started after dymploy).
+
+```yaml
+runner:
+  kind: docker
+  params:
+    depth: 1              # shallow clone (optional)
+    limits:               # the most a build may use, and what it gets when its definition says nothing
+      memory: 4g          # default 4g
+      cpus: 2             # default 2
+      timeout: 1h         # default 1h
+```
+
+A definition that asks for more than these limits is refused (exit code 2, saying which limit); one that asks for less gets
+less. Submodules are not supported by this runner.
 
 - The repository is mounted at `/work`; steps run with `sh -ec`, as the daemon's own uid:gid (so what they write
   can be read and cleaned up) with `HOME=/tmp`. Declare `build.cache` for anything that must survive between builds
   (`<data_dir>/cache/<provider>/<owner>/<repo>/<name>`, mode 0700).
 - Containers are unprivileged: all capabilities dropped, `no-new-privileges`, bounded processes, no swap, no
-  access to the Docker socket, no devices, no published ports. `build.network: none` removes the network.
+  access to the Docker socket, no devices, no published ports. The `.git` directory is mounted **read-only** inside the
+  build: the daemon runs git on the working copy afterwards, and a configuration or hook planted by a build would otherwise
+  run on the host. `build.network: none` removes the network.
   `build.limits` sets cpus, memory and the time limit; exceeding the time makes the job fail with exit code 124.
 - Environment: `build.env`, then the step's `env`, then `DYMPLOY_COMMIT`, `DYMPLOY_SHORT_COMMIT`, `DYMPLOY_OWNER`,
   `DYMPLOY_REPO`, `DYMPLOY_JOB` and `DYMPLOY_BRANCH` or `DYMPLOY_TAG`, which always win. No secret of the server is passed.

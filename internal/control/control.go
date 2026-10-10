@@ -88,7 +88,8 @@ func Serve(ctx context.Context, path string, h Handlers, ready func()) error {
 			mux.Handle(p, api)
 		}
 	}
-	srv := &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
+	// Only the local user can reach this socket, but a client that stalls still must not hold a connection.
+	srv := &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 30 * time.Second, IdleTimeout: 2 * time.Minute, MaxHeaderBytes: 64 << 10}
 
 	errc := make(chan error, 1)
 	go func() { errc <- srv.Serve(l) }()

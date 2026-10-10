@@ -35,6 +35,9 @@ type BuildSpec struct {
 	Dockerfile string // absolute path
 	Context    string // absolute path
 	Args       map[string]string
+	// Memory and CPUs bound the build as far as the engine's builder honours them.
+	Memory string
+	CPUs   float64
 }
 
 // Engine is everything dymploy needs from a container engine. The real implementation talks to the

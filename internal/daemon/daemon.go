@@ -16,6 +16,26 @@ import (
 	"github.com/dymmer-code/dymploy/internal/control"
 )
 
+// Timeouts of the public listener. A client that is slow to send its request must not be able to hold
+// a connection (and a goroutine) for ever. Connections taken over for the live channel are not subject
+// to them once upgraded.
+var (
+	readTimeout  = 30 * time.Second
+	writeTimeout = 60 * time.Second
+	idleTimeout  = 2 * time.Minute
+)
+
+func newServer(h http.Handler) *http.Server {
+	return &http.Server{
+		Handler:           h,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       readTimeout,
+		WriteTimeout:      writeTimeout,
+		IdleTimeout:       idleTimeout,
+		MaxHeaderBytes:    64 << 10,
+	}
+}
+
 // Daemon is one running instance.
 type Daemon struct {
 	cfg       *config.Config
@@ -79,7 +99,7 @@ func (d *Daemon) Run(ctx context.Context, ready func(net.Addr)) error {
 	for _, r := range d.handlers {
 		mux.Handle(r.pattern, r.handler)
 	}
-	srv := &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
+	srv := newServer(mux)
 
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()

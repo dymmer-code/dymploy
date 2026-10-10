@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -17,7 +18,10 @@ import (
 )
 
 // queueJobs adapts the queue to the small interface of the control package, which must not depend on it.
-type queueJobs struct{ m *queue.Manager }
+type queueJobs struct {
+	m   *queue.Manager
+	log *slog.Logger
+}
 
 func (q queueJobs) List(ctx context.Context, f job.Filter) ([]job.Job, error) {
 	return q.m.List(ctx, f)
@@ -37,9 +41,14 @@ func conflict(err error) error {
 	return err
 }
 
-func (q queueJobs) Cancel(ctx context.Context, id job.ID) error { return conflict(q.m.Cancel(ctx, id)) }
+func (q queueJobs) Cancel(ctx context.Context, id job.ID) error {
+	err := conflict(q.m.Cancel(ctx, id))
+	q.log.Info("audit: cancel requested through the control socket", "job", id, "ok", err == nil)
+	return err
+}
 func (q queueJobs) Retry(ctx context.Context, id job.ID) (job.Job, error) {
 	j, err := q.m.Retry(ctx, id)
+	q.log.Info("audit: retry requested through the control socket", "job", id, "new_job", j.ID, "ok", err == nil)
 	return j, conflict(err)
 }
 

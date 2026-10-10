@@ -254,3 +254,17 @@ func TestTheEngineGetsASmallEnvironment(t *testing.T) {
 		t.Fatalf("env:\n%s", env)
 	}
 }
+
+func TestBuildImageLimits(t *testing.T) {
+	c, calls := fakeDocker(t)
+	var b bytes.Buffer
+	if err := c.BuildImage(context.Background(), BuildSpec{Tag: "t", Dockerfile: "/r/D", Context: "/r", Memory: "1g", CPUs: 1.5}, &b, &b); err != nil {
+		t.Fatal(err)
+	}
+	last := calls()[len(calls())-1]
+	for _, want := range []string{"--memory 1g --memory-swap 1g", "--cpu-period 100000 --cpu-quota 150000"} {
+		if !strings.Contains(last, want) {
+			t.Errorf("%q lacks %q", last, want)
+		}
+	}
+}

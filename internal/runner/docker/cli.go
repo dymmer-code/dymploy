@@ -96,6 +96,12 @@ func (c *CLI) EnsureImage(ctx context.Context, ref string, out io.Writer) error 
 // BuildImage implements Engine.
 func (c *CLI) BuildImage(ctx context.Context, b BuildSpec, out, errOut io.Writer) error {
 	args := []string{"build", "--progress=plain", "--tag", b.Tag, "--file", b.Dockerfile}
+	if b.Memory != "" {
+		args = append(args, "--memory", b.Memory, "--memory-swap", b.Memory)
+	}
+	if b.CPUs > 0 {
+		args = append(args, "--cpu-period", "100000", "--cpu-quota", strconv.Itoa(int(b.CPUs*100000)))
+	}
 	for _, k := range sortedKeys(b.Args) {
 		args = append(args, "--build-arg", k+"="+b.Args[k])
 	}

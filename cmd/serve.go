@@ -82,8 +82,8 @@ func newServeCmd(version string) *cobra.Command {
 			hooks := buildReceiver(cfg, log, providers, intake.New(mgr, cfg.Runner.Kind, cfg.Runner.ParamsJSON()))
 			rl := &reloader{path: configPath, cur: cfg, hooks: hooks, remote: remote, targets: targets, log: log}
 			reloadOnSIGHUP(ctx, rl)
-			d := daemon.New(cfg, version).OnReload(rl.Reload).WithJobs(queueJobs{mgr})
-			if err := mountAPI(d, cfg, queueJobs{mgr}); err != nil {
+			d := daemon.New(cfg, version).OnReload(rl.Reload).WithJobs(queueJobs{mgr, log})
+			if err := mountAPI(d, cfg, queueJobs{mgr, log}, log); err != nil {
 				return err
 			}
 			if hooks != nil {
@@ -155,9 +155,12 @@ func buildQueue(cfg *config.Config, log *slog.Logger, providers map[string]provi
 	return mgr, repos, func() { store.Close() }, nil
 }
 
+// minTokenLength keeps the API token out of guessing range.
+const minTokenLength = 32
+
 // mountAPI opens the read-only API on the public listener when a token is configured. Without one
 // nothing is mounted: the jobs are then reachable only through the control socket.
-func mountAPI(d *daemon.Daemon, cfg *config.Config, jobs control.Jobs) error {
+func mountAPI(d *daemon.Daemon, cfg *config.Config, jobs control.Jobs, log *slog.Logger) error {
 	if cfg.API.TokenFile == "" {
 		return nil
 	}
@@ -165,8 +168,13 @@ func mountAPI(d *daemon.Daemon, cfg *config.Config, jobs control.Jobs) error {
 	if err != nil {
 		return fmt.Errorf("api.token_file: %w", err)
 	}
+	if len(token) < minTokenLength {
+		return fmt.Errorf("api.token_file: the token is too short (%d characters, at least %d): generate one with `openssl rand -hex 32`", len(token), minTokenLength)
+	}
 	api := &control.API{Jobs: jobs, ReadOnly: true, OriginPatterns: cfg.API.AllowedOrigins, MaxStreams: cfg.API.MaxStreams}
-	d.Handle("/api/", http.StripPrefix("/api", control.RequireToken(token, api.Handler())))
+	d.Handle("/api/", http.StripPrefix("/api", control.RequireToken(token, api.Handler(), func(r *http.Request) {
+		log.Warn("API request refused: missing or wrong token", "remote", r.RemoteAddr, "path", r.URL.Path)
+	})))
 	return nil
 }
 
@@ -206,6 +214,9 @@ func rulesOf(in []config.PolicyRule) []webhook.Rule {
 // registerDocker adds the build runner, which needs the docker command and works on top of the clone
 // runner's checkouts. The engine itself is only contacted when a job runs.
 func registerDocker(runners *runner.Registry, cl *clone.Runner, cfg *config.Config, deployer *deploy.Deployer) error {
+	if _, err := docker.ParseParams(cfg.Runner.ParamsJSON()); err != nil && cfg.Runner.Kind == docker.Kind {
+		return err
+	}
 	engine, err := docker.NewCLI("")
 	if err != nil {
 		return err

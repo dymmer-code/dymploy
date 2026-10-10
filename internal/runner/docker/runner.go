@@ -84,7 +84,13 @@ func (r *Runner) Run(ctx context.Context, t runner.Task) (runner.Result, error) 
 	if err := r.cfg.Engine.Ping(ctx); err != nil {
 		return runner.Result{}, err
 	}
-	dir, release, ev, err := r.cfg.Source(ctx, t)
+	params, err := ParseParams(t.Params)
+	if err != nil {
+		return runner.Result{}, err
+	}
+	src := t
+	src.Params = params.cloneParams() // the clone does not know the runner's own settings
+	dir, release, ev, err := r.cfg.Source(ctx, src)
 	if err != nil {
 		return runner.Result{}, err
 	}
@@ -114,7 +120,14 @@ func (r *Runner) Run(ctx context.Context, t runner.Task) (runner.Result, error) 
 		}
 	}
 
-	b := &build{r: r, t: t, m: m, ev: ev, dir: dir, id: safe(t.JobID)}
+	limits, err := params.resolve(m.Build.Limits)
+	if err != nil {
+		log.Stderr().Write([]byte(err.Error() + "\n"))
+		log.System("nothing was built")
+		return runner.Result{ExitCode: ExitBadManifest}, nil
+	}
+
+	b := &build{r: r, t: t, m: m, ev: ev, dir: dir, id: safe(t.JobID), limits: limits}
 	if b.id == "" {
 		return runner.Result{}, errors.New("the task has no usable job id")
 	}
@@ -162,6 +175,8 @@ type build struct {
 	ev  provider.Event
 	dir string
 	id  string
+
+	limits effective
 }
 
 func (b *build) env() map[string]string {
@@ -184,8 +199,7 @@ func (b *build) env() map[string]string {
 
 func (b *build) run(ctx context.Context) (runner.Result, error) {
 	log, eng := b.t.Log, b.r.cfg.Engine
-	lim := b.m.Build.Limits
-	bctx, cancel := context.WithTimeout(ctx, lim.Timeout.D())
+	bctx, cancel := context.WithTimeout(ctx, b.limits.timeout)
 	defer cancel()
 
 	// fail turns the end of bctx into the right outcome: a cancelled job is an error of the runner
@@ -195,7 +209,7 @@ func (b *build) run(ctx context.Context) (runner.Result, error) {
 			return runner.Result{}, fmt.Errorf("build interrupted: %w", ctx.Err())
 		}
 		if bctx.Err() != nil {
-			log.System(fmt.Sprintf("the build exceeded its time limit (%s) and was stopped", lim.Timeout.D()))
+			log.System(fmt.Sprintf("the build exceeded its time limit (%s) and was stopped", b.limits.timeout))
 			return runner.Result{ExitCode: ExitTimeout}, nil
 		}
 		return runner.Result{}, err
@@ -295,7 +309,7 @@ func (b *build) buildImage(ctx context.Context, im manifest.Image) (string, erro
 	}
 	tag := "dymploy-build-" + strings.ToLower(b.id)
 	b.t.Log.System(fmt.Sprintf("building the image from %s", im.Dockerfile))
-	err = b.r.cfg.Engine.BuildImage(ctx, BuildSpec{Tag: tag, Dockerfile: df, Context: cx, Args: im.Args}, b.t.Log.Stdout(), b.t.Log.Stderr())
+	err = b.r.cfg.Engine.BuildImage(ctx, BuildSpec{Tag: tag, Dockerfile: df, Context: cx, Args: im.Args, Memory: b.limits.memory, CPUs: b.limits.cpus}, b.t.Log.Stdout(), b.t.Log.Stderr())
 	return tag, err
 }
 
@@ -344,16 +358,18 @@ func (b *build) step(ctx context.Context, i int, s manifest.Step, image string, 
 		workdir = path.Join("/work", s.Workdir)
 	}
 	mounts := []Mount{{Host: b.dir, Container: "/work"}}
+	// The git directory is read-only inside the build: the daemon runs git on this working copy
+	// afterwards, and a configuration or hook planted by the build would run on the host.
+	if fi, err := os.Lstat(filepath.Join(b.dir, ".git")); err == nil && fi.IsDir() {
+		mounts = append(mounts, Mount{Host: filepath.Join(b.dir, ".git"), Container: "/work/.git", ReadOnly: true})
+	}
 	for _, c := range caches {
 		mounts = append(mounts, Mount{Host: c.host, Container: c.container})
 	}
 	spec := ContainerSpec{
 		Name: fmt.Sprintf("dymploy-%s-%d", b.id, i+1), Image: image, Cmd: []string{"sh", "-ec", s.Run},
 		Workdir: workdir, User: b.r.cfg.User, Env: env, Mounts: mounts, Network: b.m.Build.Network,
-		Memory: b.m.Build.Limits.Memory, Labels: map[string]string{"dymploy.job": b.t.JobID},
-	}
-	if c := b.m.Build.Limits.CPUs; c != nil {
-		spec.CPUs = *c
+		Memory: b.limits.memory, CPUs: b.limits.cpus, Labels: map[string]string{"dymploy.job": b.t.JobID},
 	}
 	id, err := eng.Create(ctx, spec)
 	if err != nil {

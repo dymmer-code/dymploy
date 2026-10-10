@@ -1132,7 +1132,7 @@ func TestThePublicAPIIsClosedWithoutATokenAndReadOnlyWithOne(t *testing.T) {
 	// open, with a token
 	dir := tmpDir(t)
 	tokenFile := filepath.Join(dir, "api.token")
-	os.WriteFile(tokenFile, []byte("a-long-random-token\n"), 0o600)
+	os.WriteFile(tokenFile, []byte("0123456789abcdef0123456789abcdef0123\n"), 0o600)
 	addr = freeAddr(t)
 	cfg = hookConfig(t, dir, addr, "api:\n  token_file: "+tokenFile+"\n")
 	stop = startWith(t, cfg, filepath.Join(dir, "c.sock"))
@@ -1158,7 +1158,7 @@ func TestThePublicAPIIsClosedWithoutATokenAndReadOnlyWithOne(t *testing.T) {
 	if r := get("/api/v1/jobs", "wrong"); r.StatusCode != 401 {
 		t.Fatalf("wrong token: %d", r.StatusCode)
 	}
-	r := get("/api/v1/jobs", "a-long-random-token")
+	r := get("/api/v1/jobs", "0123456789abcdef0123456789abcdef0123")
 	body, _ := io.ReadAll(r.Body)
 	r.Body.Close()
 	if r.StatusCode != 200 || !strings.Contains(string(body), "github/acme/shop") || strings.Contains(string(body), `"input"`) {
@@ -1166,10 +1166,32 @@ func TestThePublicAPIIsClosedWithoutATokenAndReadOnlyWithOne(t *testing.T) {
 	}
 	_ = id
 	req, _ := http.NewRequest(http.MethodPost, "http://"+addr+"/api/v1/jobs/x/cancel", nil)
-	req.Header.Set("Authorization", "Bearer a-long-random-token")
+	req.Header.Set("Authorization", "Bearer 0123456789abcdef0123456789abcdef0123")
 	if resp, _ := http.DefaultClient.Do(req); resp.StatusCode == 200 {
 		t.Fatal("the public API is read-only")
 	}
+}
+
+func TestServeRefusesATooShortAPIToken(t *testing.T) {
+	dir := tmpDir(t)
+	short := filepath.Join(dir, "token")
+	os.WriteFile(short, []byte("guessable\n"), 0o600)
+	if err := serveFails(t, hookConfig(t, dir, freeAddr(t), "api:\n  token_file: "+short+"\n")); !strings.Contains(err.Error(), "too short") {
+		t.Fatalf("%v", err)
+	}
+}
+
+func TestServeRefusesBadDockerParams(t *testing.T) {
+	fakeDockerOnPath(t)
+	dir := tmpDir(t)
+	err := serveFails(t, hookConfig(t, dir, freeAddr(t), "runner:\n  kind: docker\n  params: {limits: {memry: 1g}}\n"))
+	if !strings.Contains(err.Error(), "docker runner's params") {
+		t.Fatalf("%v", err)
+	}
+	// with another runner the docker settings are not looked at
+	dir = tmpDir(t)
+	stop := startWith(t, hookConfig(t, dir, freeAddr(t), "runner:\n  kind: dryrun\n"), filepath.Join(dir, "c.sock"))
+	stop()
 }
 
 func TestServeRefusesAnUnusableAPIToken(t *testing.T) {

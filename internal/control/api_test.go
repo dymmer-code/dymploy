@@ -470,7 +470,8 @@ func TestReadOnlyAPIHasNoWriteEndpoints(t *testing.T) {
 
 func TestRequireToken(t *testing.T) {
 	ok := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(204) })
-	h := RequireToken("s3cret-token", ok)
+	var denied int
+	h := RequireToken("s3cret-token", ok, func(*http.Request) { denied++ })
 	for name, tc := range map[string]struct {
 		header string
 		want   int
@@ -495,6 +496,10 @@ func TestRequireToken(t *testing.T) {
 			if tc.want == 401 && w.Header().Get("WWW-Authenticate") == "" {
 				t.Fatal("a 401 must say how to authenticate")
 			}
+			if (tc.want == 401) != (denied == 1) {
+				t.Fatalf("every refusal is reported, and only refusals: denied=%d", denied)
+			}
+			denied = 0
 		})
 	}
 }

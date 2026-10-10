@@ -7,8 +7,11 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/coder/websocket"
 
 	"github.com/dymmer-code/dymploy/internal/config"
 	"github.com/dymmer-code/dymploy/internal/control"
@@ -167,5 +170,88 @@ func TestJobsAndReloadAreOfferedOnTheControlSocket(t *testing.T) {
 	cancel()
 	if err := <-done; err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestASlowClientCannotHoldAConnectionForEver(t *testing.T) {
+	old := readTimeout
+	readTimeout = 300 * time.Millisecond
+	defer func() { readTimeout = old }()
+	addr, stop := run(t, testConfig(t))
+	defer stop()
+	conn, err := net.Dial("tcp", addr.String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	// a request that promises a body and never sends it
+	conn.Write([]byte("POST /hooks/github HTTP/1.1\r\nHost: x\r\nContent-Length: 1000\r\n\r\nabc"))
+	conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	buf := make([]byte, 1024)
+	start := time.Now()
+	for {
+		if _, err := conn.Read(buf); err != nil {
+			if ne, ok := err.(net.Error); ok && ne.Timeout() {
+				t.Fatal("the server kept waiting for a body that never came")
+			}
+			break // closed by the server
+		}
+	}
+	if time.Since(start) > 4*time.Second {
+		t.Fatalf("took %s", time.Since(start))
+	}
+}
+
+func TestOversizedHeadersAreRefused(t *testing.T) {
+	addr, stop := run(t, testConfig(t))
+	defer stop()
+	req, _ := http.NewRequest("GET", "http://"+addr.String()+"/healthz", nil)
+	req.Header.Set("X-Big", strings.Repeat("a", 200<<10))
+	resp, err := http.DefaultClient.Do(req)
+	if err == nil {
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusRequestHeaderFieldsTooLarge {
+			t.Fatalf("got %d", resp.StatusCode)
+		}
+	}
+}
+
+// emitter is a Jobs whose events the test controls.
+type emitter struct {
+	noJobs
+	ch chan control.Event
+}
+
+func (e emitter) Subscribe() (<-chan control.Event, func()) { return e.ch, func() {} }
+
+func TestTheLiveChannelOutlivesTheServerTimeouts(t *testing.T) {
+	oldR, oldW, oldI := readTimeout, writeTimeout, idleTimeout
+	readTimeout, writeTimeout, idleTimeout = 300*time.Millisecond, 300*time.Millisecond, 300*time.Millisecond
+	defer func() { readTimeout, writeTimeout, idleTimeout = oldR, oldW, oldI }()
+	em := emitter{ch: make(chan control.Event, 4)}
+	cfg := testConfig(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	ready := make(chan net.Addr, 1)
+	d := New(cfg, "v").Handle("/v1/", (&control.API{Jobs: em}).Handler())
+	go func() { done <- d.Run(ctx, func(a net.Addr) { ready <- a }) }()
+	addr := <-ready
+	defer func() { cancel(); <-done }()
+
+	c, _, err := websocket.Dial(ctx, "ws://"+addr.String()+"/v1/events", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.CloseNow()
+	if _, _, err := c.Read(ctx); err != nil { // the snapshot
+		t.Fatal(err)
+	}
+	time.Sleep(time.Second) // several times the timeouts
+	em.ch <- control.Event{Type: "queued", Job: job.Job{ID: "late", State: job.Queued}}
+	rctx, rcancel := context.WithTimeout(ctx, 3*time.Second)
+	defer rcancel()
+	_, data, err := c.Read(rctx)
+	if err != nil || !strings.Contains(string(data), "late") {
+		t.Fatalf("the channel must survive the HTTP timeouts: %v %s", err, data)
 	}
 }

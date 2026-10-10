@@ -162,3 +162,56 @@ artifact: {name: app, paths: [out/g]}
 		t.Fatalf("got %q", b)
 	}
 }
+
+// The daemon runs git on the working copy after the build: a build must not be able to plant a
+// configuration or a hook in it.
+func TestRealBuildCannotTouchTheGitDirectory(t *testing.T) {
+	_, r := realRig(t, `version: 1
+build:
+  image: {from: "alpine:3"}
+  limits: {memory: 256m, cpus: 1, timeout: 3m}
+  steps:
+    - name: try to plant things
+      run: |
+        mkdir -p out
+        if echo 'fsmonitor = /tmp/evil' >> .git/config 2>/dev/null; then echo PLANTED > out/result; exit 0; fi
+        if mkdir -p .git/hooks 2>/dev/null && echo x > .git/hooks/post-checkout 2>/dev/null; then echo PLANTED > out/result; exit 0; fi
+        if touch .git/new-file 2>/dev/null; then echo PLANTED > out/result; exit 0; fi
+        echo REFUSED > out/result
+        # the working tree itself is still writable
+        echo ok > out/tree
+artifact: {name: app, paths: [out]}
+`, map[string]string{".git/config": "[core]\n\trepositoryformatversion = 0\n"})
+	res, err := r.do(context.Background())
+	if err != nil || res.ExitCode != 0 {
+		t.Fatalf("%+v %v\n%s", res, err, r.log())
+	}
+	if b, _ := os.ReadFile(filepath.Join(r.repo, "out", "result")); strings.TrimSpace(string(b)) != "REFUSED" {
+		t.Fatalf("the build changed the git directory: %q", b)
+	}
+	if b, _ := os.ReadFile(filepath.Join(r.repo, ".git", "config")); strings.Contains(string(b), "evil") {
+		t.Fatalf("config was altered: %q", b)
+	}
+	if b, _ := os.ReadFile(filepath.Join(r.repo, "out", "tree")); strings.TrimSpace(string(b)) != "ok" {
+		t.Fatal("the working tree must stay writable")
+	}
+}
+
+func TestRealBuildIsHeldToItsMemoryLimit(t *testing.T) {
+	_, r := realRig(t, `version: 1
+build:
+  image: {from: "alpine:3"}
+  limits: {memory: 64m, timeout: 2m}
+  steps:
+    - name: eat memory
+      run: |
+        # a shell cannot hold 300 MB in 64 MB: the kernel kills it
+        head -c 300000000 /dev/zero | tail -c 1 > /dev/null
+        x=$(head -c 300000000 /dev/zero | tr '\0' 'a'); echo ${#x}
+artifact: {paths: [x]}
+`, nil)
+	res, err := r.do(context.Background())
+	if err != nil || res.ExitCode == 0 {
+		t.Fatalf("a build that exceeds its memory must fail: %+v %v\n%s", res, err, r.log())
+	}
+}

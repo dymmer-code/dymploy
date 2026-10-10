@@ -4,6 +4,7 @@ import (
 	"archive/tar"
 	"compress/gzip"
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -511,5 +512,87 @@ func TestAJobWithoutDeployDoesNotNeedTargets(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(r.arts, "job-1", artifact.RecordFile)); err != nil {
 		t.Fatalf("every artifact gets its record: %v", err)
+	}
+}
+
+func TestTheServersLimitsAreAppliedAndCannotBeExceeded(t *testing.T) {
+	r := newRig(t, basic)
+	r.eng.Script = func(docker.ContainerSpec) dockertest.Behavior {
+		return dockertest.Behavior{Effect: writeOut("out/app")}
+	}
+	if res, err := r.do(context.Background()); err != nil || res.ExitCode != 0 {
+		t.Fatalf("%+v %v", res, err)
+	}
+	if c := r.eng.Created[0]; c.Memory != "4g" || c.CPUs != 2 {
+		t.Fatalf("a definition with no limits gets the server's defaults, not unlimited: %+v", c)
+	}
+
+	r = newRig(t, strings.Replace(basic, "build:\n", "build:\n  limits: {memory: 64g}\n", 1))
+	res, err := r.do(context.Background())
+	if err != nil || res.ExitCode != docker.ExitBadManifest || !strings.Contains(r.log(), "more than this server allows") || len(r.eng.Created) != 0 {
+		t.Fatalf("res=%+v err=%v\n%s", res, err, r.log())
+	}
+}
+
+func TestBadServerParamsAreErrorsOfTheRunner(t *testing.T) {
+	r := newRig(t, basic)
+	_, err := r.run.Run(context.Background(), runner.Task{JobID: "j", Params: json.RawMessage(`{"submodules":true}`), Log: runner.NewLineReporter(func(runner.Stream, string) {})})
+	if err == nil || !strings.Contains(err.Error(), "submodules are not supported") {
+		t.Fatalf("%v", err)
+	}
+}
+
+func TestTheCloneStepOnlyReceivesItsOwnParams(t *testing.T) {
+	r := newRig(t, basic)
+	var got json.RawMessage
+	r.run, _ = docker.New(docker.Config{
+		Engine: r.eng, ArtifactsDir: r.arts, CacheDir: r.cache, User: "1:1",
+		Source: func(_ context.Context, t runner.Task) (string, func(), provider.Event, error) {
+			got = t.Params
+			return r.repo, func() {}, provider.Event{Provider: "github", Owner: "a", Repo: "b", Commit: commit}, nil
+		},
+	})
+	r.eng.Script = func(docker.ContainerSpec) dockertest.Behavior {
+		return dockertest.Behavior{Effect: writeOut("out/app")}
+	}
+	rep := runner.NewLineReporter(func(runner.Stream, string) {})
+	if _, err := r.run.Run(context.Background(), runner.Task{JobID: "j", Params: json.RawMessage(`{"depth":3,"limits":{"memory":"1g"}}`), Log: rep}); err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != `{"depth":3}` {
+		t.Fatalf("the clone saw %s", got)
+	}
+}
+
+func TestTheGitDirectoryIsReadOnlyInsideTheBuild(t *testing.T) {
+	r := newRig(t, basic)
+	os.MkdirAll(filepath.Join(r.repo, ".git"), 0o755)
+	r.eng.Script = func(docker.ContainerSpec) dockertest.Behavior {
+		return dockertest.Behavior{Effect: writeOut("out/app")}
+	}
+	if res, err := r.do(context.Background()); err != nil || res.ExitCode != 0 {
+		t.Fatalf("%+v %v", res, err)
+	}
+	var found bool
+	for _, m := range r.eng.Created[0].Mounts {
+		if m.Container == "/work/.git" {
+			found = true
+			if !m.ReadOnly || m.Host != filepath.Join(r.repo, ".git") {
+				t.Fatalf("%+v", m)
+			}
+		}
+	}
+	if !found {
+		t.Fatal(".git must be mounted read-only over the working copy")
+	}
+	// a repository without a .git directory (a gitlink file, for instance) gets no extra mount
+	r = newRig(t, basic)
+	os.WriteFile(filepath.Join(r.repo, ".git"), []byte("gitdir: elsewhere"), 0o644)
+	r.eng.Script = func(docker.ContainerSpec) dockertest.Behavior {
+		return dockertest.Behavior{Effect: writeOut("out/app")}
+	}
+	r.do(context.Background())
+	if len(r.eng.Created[0].Mounts) != 1 {
+		t.Fatalf("%+v", r.eng.Created[0].Mounts)
 	}
 }
