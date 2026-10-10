@@ -13,6 +13,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/dymmer-code/dymploy/internal/checkout"
 	"github.com/dymmer-code/dymploy/internal/config"
 	"github.com/dymmer-code/dymploy/internal/daemon"
 	"github.com/dymmer-code/dymploy/internal/intake"
@@ -21,6 +22,7 @@ import (
 	"github.com/dymmer-code/dymploy/internal/provider/github"
 	"github.com/dymmer-code/dymploy/internal/queue"
 	"github.com/dymmer-code/dymploy/internal/runner"
+	"github.com/dymmer-code/dymploy/internal/runner/clone"
 	"github.com/dymmer-code/dymploy/internal/runner/dryrun"
 	"github.com/dymmer-code/dymploy/internal/secret"
 	"github.com/dymmer-code/dymploy/internal/webhook"
@@ -41,7 +43,11 @@ func newServeCmd(version string) *cobra.Command {
 			ctx, stop := signal.NotifyContext(c.Context(), syscall.SIGINT, syscall.SIGTERM)
 			defer stop()
 
-			mgr, closeState, err := buildQueue(cfg, log)
+			providers, err := buildProviders(cfg)
+			if err != nil {
+				return err
+			}
+			mgr, repos, closeState, err := buildQueue(cfg, log, providers)
 			if err != nil {
 				return err
 			}
@@ -52,16 +58,11 @@ func newServeCmd(version string) *cobra.Command {
 			pruneCtx, stopPrune := context.WithCancel(ctx)
 			defer stopPrune()
 			go mgr.PruneLoop(pruneCtx, time.Hour, time.Duration(cfg.Queue.KeepDays)*24*time.Hour, cfg.Queue.KeepJobs)
+			if repos != nil && cfg.RepoKeepDays > 0 {
+				go cleanRepos(pruneCtx, repos, time.Duration(cfg.RepoKeepDays)*24*time.Hour, log)
+			}
 
-			params, err := cfg.Runner.ParamsJSON()
-			if err != nil {
-				return fmt.Errorf("runner.params: %w", err)
-			}
-			hooks, err := buildReceiver(cfg, log, intake.New(mgr, cfg.Runner.Kind, params))
-			if err != nil {
-				_ = shutdownQueue(mgr)
-				return err
-			}
+			hooks := buildReceiver(cfg, log, providers, intake.New(mgr, cfg.Runner.Kind, cfg.Runner.ParamsJSON()))
 			d := daemon.New(cfg, version)
 			if hooks != nil {
 				d.Handle("/hooks/", hooks.Handler())
@@ -85,40 +86,79 @@ func shutdownQueue(mgr *queue.Manager) error {
 }
 
 // buildQueue is the composition root for execution: it decides which runners exist, where state and
-// logs live, and returns the queue plus a function that releases the state.
-func buildQueue(cfg *config.Config, log *slog.Logger) (*queue.Manager, func(), error) {
+// logs live, and returns the queue, the working-copy manager (nil when git is not available and no
+// job needs it) and a function that releases the state.
+func buildQueue(cfg *config.Config, log *slog.Logger, providers map[string]provider.Provider) (*queue.Manager, *checkout.Manager, func(), error) {
 	runners := runner.NewRegistry()
-	if err := runners.Register(dryrun.Kind, dryrun.New()); err != nil {
-		return nil, nil, err
+	runners.MustRegister(dryrun.Kind, dryrun.New())
+	repos, err := checkout.New(checkout.Config{Root: filepath.Join(cfg.DataDir, "repos")})
+	switch {
+	case err == nil:
+		finder := func(name string) (provider.Cloner, bool) {
+			c, ok := providers[name].(provider.Cloner)
+			return c, ok
+		}
+		runners.MustRegister(clone.Kind, clone.New(repos, finder))
+	case cfg.Runner.Kind == clone.Kind:
+		return nil, nil, nil, fmt.Errorf("runner.kind %q needs git: %w", clone.Kind, err)
+	default:
+		log.Warn("git is not available: jobs that clone repositories cannot run", "error", err)
+		repos = nil
 	}
 	if _, err := runners.Get(cfg.Runner.Kind); err != nil {
-		return nil, nil, fmt.Errorf("runner.kind: %w (available: %s)", err, strings.Join(runners.Kinds(), ", "))
+		return nil, nil, nil, fmt.Errorf("runner.kind: %w (available: %s)", err, strings.Join(runners.Kinds(), ", "))
 	}
 	store, err := job.OpenBolt(filepath.Join(cfg.DataDir, "state", "jobs.db"))
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	logs, err := job.NewFileLogs(filepath.Join(cfg.DataDir, "logs"), cfg.Queue.LogMaxBytes)
 	if err != nil {
 		store.Close()
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	mgr, err := queue.New(queue.Config{
 		MaxConcurrent: cfg.Queue.MaxConcurrent, MaxPending: cfg.Queue.MaxPending, OnBusy: queue.Policy(cfg.Queue.OnBusy),
 	}, queue.Deps{Store: store, Logs: logs, Runners: runners, Log: log})
 	if err != nil {
 		store.Close()
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
-	return mgr, func() { store.Close() }, nil
+	return mgr, repos, func() { store.Close() }, nil
 }
 
-// buildReceiver is the composition root for webhooks: the only place that decides which provider
-// implementation serves each configured name. It returns nil when no webhooks are configured.
-func buildReceiver(cfg *config.Config, log *slog.Logger, q webhook.Enqueuer) (*webhook.Receiver, error) {
-	if len(cfg.Webhooks) == 0 {
-		return nil, nil
+// cleanRepos removes working copies nobody has used for a while, once an hour.
+func cleanRepos(ctx context.Context, repos *checkout.Manager, olderThan time.Duration, log *slog.Logger) {
+	runEvery(ctx, time.Hour, func() { cleanOnce(ctx, repos, olderThan, log) })
+}
+
+func cleanOnce(ctx context.Context, repos *checkout.Manager, olderThan time.Duration, log *slog.Logger) {
+	n, err := repos.Clean(ctx, olderThan)
+	switch {
+	case err != nil:
+		log.Warn("cleaning old working copies failed", "error", err)
+	case n > 0:
+		log.Info("old working copies removed", "removed", n)
 	}
+}
+
+// runEvery calls f every interval until ctx ends.
+func runEvery(ctx context.Context, interval time.Duration, f func()) {
+	tick := time.NewTicker(interval)
+	defer tick.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-tick.C:
+			f()
+		}
+	}
+}
+
+// buildProviders is the composition root for repository providers: the only place that decides which
+// implementation serves each configured name. It reads their secrets and, for GitHub, the App key.
+func buildProviders(cfg *config.Config) (map[string]provider.Provider, error) {
 	names := make([]string, 0, len(cfg.Webhooks))
 	for name := range cfg.Webhooks {
 		names = append(names, name)
@@ -126,9 +166,10 @@ func buildReceiver(cfg *config.Config, log *slog.Logger, q webhook.Enqueuer) (*w
 	sort.Strings(names)
 	providers := map[string]provider.Provider{}
 	for _, name := range names {
+		wc := cfg.Webhooks[name]
 		switch name {
 		case "github":
-			sec, err := secret.ReadFile(cfg.Webhooks[name].SecretFile)
+			sec, err := secret.ReadFile(wc.SecretFile)
 			if err != nil {
 				return nil, fmt.Errorf("webhooks.%s: %w", name, err)
 			}
@@ -136,10 +177,33 @@ func buildReceiver(cfg *config.Config, log *slog.Logger, q webhook.Enqueuer) (*w
 			if err != nil {
 				return nil, fmt.Errorf("webhooks.%s: %w", name, err)
 			}
+			if wc.AppID != 0 {
+				pemText, err := secret.ReadFile(wc.PrivateKeyFile)
+				if err != nil {
+					return nil, fmt.Errorf("webhooks.%s.private_key_file: %w", name, err)
+				}
+				key, err := github.ParsePrivateKey([]byte(pemText))
+				if err != nil {
+					return nil, fmt.Errorf("webhooks.%s.private_key_file %s: %w", name, wc.PrivateKeyFile, err)
+				}
+				app, err := github.NewApp(wc.AppID, key)
+				if err != nil {
+					return nil, fmt.Errorf("webhooks.%s: %w", name, err)
+				}
+				p = p.WithApp(app)
+			}
 			providers[name] = p
 		default:
 			return nil, fmt.Errorf("webhooks.%s: unsupported provider (supported: github)", name)
 		}
+	}
+	return providers, nil
+}
+
+// buildReceiver assembles the webhook receiver; it returns nil when no webhooks are configured.
+func buildReceiver(cfg *config.Config, log *slog.Logger, providers map[string]provider.Provider, q webhook.Enqueuer) *webhook.Receiver {
+	if len(providers) == 0 {
+		return nil
 	}
 	rules := make([]webhook.Rule, len(cfg.Policy))
 	for i, r := range cfg.Policy {
@@ -153,5 +217,5 @@ func buildReceiver(cfg *config.Config, log *slog.Logger, q webhook.Enqueuer) (*w
 		Limiter:   webhook.NewLimiter(cfg.WebhookRatePerMinute, time.Minute),
 		MaxBody:   cfg.WebhookMaxBody,
 		Log:       log,
-	}, nil
+	}
 }

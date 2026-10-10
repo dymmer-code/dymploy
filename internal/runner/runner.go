@@ -76,6 +76,14 @@ func (r *Registry) Register(kind string, run Runner) error {
 	return nil
 }
 
+// MustRegister is Register for wiring code, where a duplicate or empty kind is a programming error
+// and must stop the program at start, not be handled.
+func (r *Registry) MustRegister(kind string, run Runner) {
+	if err := r.Register(kind, run); err != nil {
+		panic(err)
+	}
+}
+
 // Get returns the runner for kind.
 func (r *Registry) Get(kind string) (Runner, error) {
 	r.mu.RLock()

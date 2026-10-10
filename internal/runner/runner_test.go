@@ -54,3 +54,22 @@ func TestKindsAreListedSorted(t *testing.T) {
 		t.Fatalf("%v", got)
 	}
 }
+
+func TestMustRegisterPanicsOnProgrammingErrors(t *testing.T) {
+	r := NewRegistry()
+	r.MustRegister("a", nop{})
+	for name, f := range map[string]func(){
+		"duplicate": func() { r.MustRegister("a", nop{}) },
+		"empty":     func() { r.MustRegister("", nop{}) },
+		"nil":       func() { r.MustRegister("b", nil) },
+	} {
+		func() {
+			defer func() {
+				if recover() == nil {
+					t.Errorf("%s must panic", name)
+				}
+			}()
+			f()
+		}()
+	}
+}

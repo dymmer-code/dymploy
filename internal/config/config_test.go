@@ -167,28 +167,69 @@ runner:
 	if c.Runner.Kind != "docker" || c.Runner.Params["image"] != "debian:13" {
 		t.Fatalf("%+v", c.Runner)
 	}
-	raw, err := c.Runner.ParamsJSON()
-	if err != nil || string(raw) != `{"image":"debian:13","nested":{"list":[1,2,{"x":"y"}]}}` {
-		t.Fatalf("the parameters travel as opaque JSON: %s %v", raw, err)
+	if raw := c.Runner.ParamsJSON(); string(raw) != `{"image":"debian:13","nested":{"list":[1,2,{"x":"y"}]}}` {
+		t.Fatalf("the parameters travel as opaque JSON: %s", raw)
 	}
 }
 
 func TestEmptyParamsAreNoParams(t *testing.T) {
-	raw, err := (RunnerConfig{Kind: "x"}).ParamsJSON()
-	if err != nil || raw != nil {
-		t.Fatalf("%q %v", raw, err)
+	if raw := (RunnerConfig{Kind: "x"}).ParamsJSON(); raw != nil {
+		t.Fatalf("%q", raw)
 	}
 }
 
 func TestQueueValidation(t *testing.T) {
 	for name, body := range map[string]string{
-		"no concurrency":   "queue:\n  max_concurrent: 0\n",
-		"negative pending": "queue:\n  max_pending: -1\n",
-		"unknown policy":   "queue:\n  on_busy: sometimes\n",
-		"negative log cap": "queue:\n  log_max_bytes: -1\n",
-		"negative keep":    "queue:\n  keep_jobs: -1\n",
-		"negative days":    "queue:\n  keep_days: -1\n",
-		"empty runner":     "runner:\n  kind: \"\"\n",
+		"no concurrency":            "queue:\n  max_concurrent: 0\n",
+		"negative pending":          "queue:\n  max_pending: -1\n",
+		"unknown policy":            "queue:\n  on_busy: sometimes\n",
+		"negative log cap":          "queue:\n  log_max_bytes: -1\n",
+		"negative keep":             "queue:\n  keep_jobs: -1\n",
+		"negative days":             "queue:\n  keep_days: -1\n",
+		"empty runner":              "runner:\n  kind: \"\"\n",
+		"params that cannot travel": "runner:\n  kind: x\n  params:\n    ratio: .inf\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := Load(write(t, body)); err == nil {
+				t.Fatalf("must be rejected:\n%s", body)
+			}
+		})
+	}
+}
+
+func TestGitHubAppSettings(t *testing.T) {
+	c, err := Load(write(t, `
+webhooks:
+  github:
+    secret_file: /etc/dymploy/hook.secret
+    app_id: 123456
+    private_key_file: /etc/dymploy/app.pem
+repo_keep_days: 7
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	g := c.Webhooks["github"]
+	if g.AppID != 123456 || g.PrivateKeyFile != "/etc/dymploy/app.pem" || c.RepoKeepDays != 7 {
+		t.Fatalf("%+v %d", g, c.RepoKeepDays)
+	}
+}
+
+func TestRepoKeepDaysDefault(t *testing.T) {
+	c, _ := Load(write(t, ""))
+	if c.RepoKeepDays != 14 {
+		t.Fatal(c.RepoKeepDays)
+	}
+}
+
+func TestAppSettingsValidation(t *testing.T) {
+	base := "webhooks:\n  github:\n    secret_file: /s\n"
+	for name, body := range map[string]string{
+		"app id without key":      base + "    app_id: 1\n",
+		"key without app id":      base + "    private_key_file: /k\n",
+		"relative key":            base + "    app_id: 1\n    private_key_file: k.pem\n",
+		"negative app id":         base + "    app_id: -1\n    private_key_file: /k\n",
+		"negative repo keep days": "repo_keep_days: -1\n",
 	} {
 		t.Run(name, func(t *testing.T) {
 			if _, err := Load(write(t, body)); err == nil {

@@ -40,6 +40,8 @@ type Config struct {
 	Queue QueueConfig `yaml:"queue"`
 	// Runner is how the jobs started by webhooks are executed.
 	Runner RunnerConfig `yaml:"runner"`
+	// RepoKeepDays removes working copies of repositories not used for this many days; 0 keeps them.
+	RepoKeepDays int `yaml:"repo_keep_days"`
 }
 
 // QueueConfig sets the limits of the job queue.
@@ -63,20 +65,35 @@ type QueueConfig struct {
 type RunnerConfig struct {
 	Kind   string         `yaml:"kind"`
 	Params map[string]any `yaml:"params"`
+
+	paramsJSON json.RawMessage // set by Validate
 }
 
-// ParamsJSON returns Params as the opaque JSON the queue transports; nil when there are none.
-func (r RunnerConfig) ParamsJSON() (json.RawMessage, error) {
+// ParamsJSON returns Params as the opaque JSON the queue transports; nil when there are none. It is
+// ready after Load/Validate, which reject parameters that cannot be represented.
+func (r RunnerConfig) ParamsJSON() json.RawMessage { return r.paramsJSON }
+
+func (r *RunnerConfig) prepare() error {
+	r.paramsJSON = nil
 	if len(r.Params) == 0 {
-		return nil, nil
+		return nil
 	}
-	return json.Marshal(r.Params)
+	raw, err := json.Marshal(r.Params)
+	if err != nil {
+		return fmt.Errorf("runner.params cannot be handed to the runner: %w", err)
+	}
+	r.paramsJSON = raw
+	return nil
 }
 
 // WebhookConfig is the authentication setup of one provider.
 type WebhookConfig struct {
 	// SecretFile is an absolute path to a file with the webhook secret (not readable by others).
 	SecretFile string `yaml:"secret_file"`
+	// AppID and PrivateKeyFile identify the GitHub App used to clone private repositories (both or
+	// neither). The key file must not be readable by other users.
+	AppID          int64  `yaml:"app_id"`
+	PrivateKeyFile string `yaml:"private_key_file"`
 }
 
 // PolicyRule allows pushes of one provider to repositories of one owner (see webhook.Rule).
@@ -99,8 +116,9 @@ func Default() *Config {
 		WebhookMaxBody:       5 << 20,
 		WebhookRatePerMinute: 600,
 
-		Queue:  QueueConfig{MaxConcurrent: 2, MaxPending: 1000, OnBusy: "queue", LogMaxBytes: 10 << 20, KeepJobs: 500, KeepDays: 30},
-		Runner: RunnerConfig{Kind: "dryrun"},
+		RepoKeepDays: 14,
+		Queue:        QueueConfig{MaxConcurrent: 2, MaxPending: 1000, OnBusy: "queue", LogMaxBytes: 10 << 20, KeepJobs: 500, KeepDays: 30},
+		Runner:       RunnerConfig{Kind: "dryrun"},
 	}
 }
 
@@ -133,6 +151,9 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("%s %q must be an absolute path", name, p)
 		}
 	}
+	if c.RepoKeepDays < 0 {
+		return errors.New("repo_keep_days must not be negative")
+	}
 	if c.WebhookMaxBody < 0 || c.WebhookRatePerMinute < 0 {
 		return errors.New("webhook_max_body_bytes and webhook_rate_per_minute must not be negative")
 	}
@@ -142,14 +163,24 @@ func (c *Config) Validate() error {
 	if c.Runner.Kind == "" {
 		return errors.New("runner.kind must not be empty")
 	}
+	if err := c.Runner.prepare(); err != nil {
+		return err
+	}
 	names := make([]string, 0, len(c.Webhooks))
 	for name := range c.Webhooks {
 		names = append(names, name)
 	}
 	sort.Strings(names)
 	for _, name := range names {
-		if f := c.Webhooks[name].SecretFile; !filepath.IsAbs(f) {
-			return fmt.Errorf("webhooks.%s.secret_file %q must be an absolute path", name, f)
+		w := c.Webhooks[name]
+		if !filepath.IsAbs(w.SecretFile) {
+			return fmt.Errorf("webhooks.%s.secret_file %q must be an absolute path", name, w.SecretFile)
+		}
+		if w.AppID < 0 || (w.AppID == 0) != (w.PrivateKeyFile == "") {
+			return fmt.Errorf("webhooks.%s: app_id and private_key_file must be given together", name)
+		}
+		if w.PrivateKeyFile != "" && !filepath.IsAbs(w.PrivateKeyFile) {
+			return fmt.Errorf("webhooks.%s.private_key_file %q must be an absolute path", name, w.PrivateKeyFile)
 		}
 	}
 	for i, r := range c.Policy {

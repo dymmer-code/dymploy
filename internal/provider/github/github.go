@@ -18,7 +18,10 @@ import (
 )
 
 // Provider is the GitHub provider.
-type Provider struct{ secret []byte }
+type Provider struct {
+	secret []byte
+	app    *App // optional: lets the provider clone private repositories
+}
 
 // New returns a provider that authenticates deliveries with the webhook secret configured in the
 // GitHub App. An empty secret would accept anything, so it is an error.

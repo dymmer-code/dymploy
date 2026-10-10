@@ -1,6 +1,7 @@
 package fake
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -47,5 +48,20 @@ func TestFakeProviderRejectsIncompletePayloads(t *testing.T) {
 func TestFakeName(t *testing.T) {
 	if New("x").Name() != "fake" {
 		t.Fatal("name")
+	}
+}
+
+func TestFakeProviderAsCloner(t *testing.T) {
+	var _ provider.Cloner = New("tok").WithBase("/srv/git")
+	p := New("tok").WithBase("/srv/git")
+	if got := p.RepositoryURL("acme", "app"); got != "/srv/git/acme/app.git" {
+		t.Fatal(got)
+	}
+	creds, err := p.CloneCredentials(context.Background(), &provider.Event{Owner: "acme", Repo: "app"})
+	if err != nil || creds.Username == "" || creds.Password == "" {
+		t.Fatalf("%+v %v", creds, err)
+	}
+	if _, err := New("tok").CloneCredentials(context.Background(), &provider.Event{}); err == nil {
+		t.Fatal("without a base directory the fake cannot clone")
 	}
 }

@@ -60,8 +60,13 @@ type Credentials struct {
 	ExpiresAt time.Time
 }
 
-// Cloner is implemented by providers that can issue read-only credentials for an event's repository.
+// Cloner is implemented by providers that can say where a repository lives and issue read-only
+// credentials for it.
 type Cloner interface {
+	// RepositoryURL is where owner/repo is cloned from. The provider builds it; it is never taken from
+	// the webhook payload, so a payload cannot point a build at another host.
+	RepositoryURL(owner, repo string) string
+	// CloneCredentials returns credentials that can only read the event's repository, for a limited time.
 	CloneCredentials(ctx context.Context, ev *Event) (Credentials, error)
 }
 

@@ -64,6 +64,35 @@ Answers: `202` accepted · `200` ignored (ping, other events, deleted refs) or d
 `400` malformed · `401` not authenticated · `403` outside the policy · `405` not POST · `413` too large ·
 `429` rate limited · `503` queue full (retry).
 
+## Cloning repositories
+
+`runner.kind: clone` checks out the commit of the event in a working copy under `<data_dir>/repos/<provider>/<owner>/<repo>`
+(created if missing, updated otherwise, cleaned before every build, one user at a time). Everything git-related
+lives in `internal/checkout`:
+
+- Credentials are read-only and short-lived, issued by the provider, and travel to git in environment variables scoped
+  to the repository's own host: never in arguments, URLs, logs or files (the remote is stored without them).
+- git runs with a private `HOME`, the user's and the system's configuration ignored, hooks disabled, submodules
+  fetched only when asked (`params: {submodules: true}`) and every value validated before it reaches git.
+- URLs must be `https`; the provider builds them, they are never taken from the webhook payload.
+- Working copies not used for `repo_keep_days` (default 14) are removed.
+
+For GitHub, private repositories need an App: give the webhook entry `app_id` and `private_key_file` (the `.pem`, mode
+`0600`). dymploy signs a short-lived JWT and asks GitHub for an installation token limited to **that one repository** and
+to **reading its contents**.
+
+```yaml
+webhooks:
+  github:
+    secret_file: /etc/dymploy/github-webhook-secret
+    app_id: 123456
+    private_key_file: /etc/dymploy/github-app.pem
+runner:
+  kind: clone
+  params: {depth: 1, submodules: false}   # both optional; unknown keys are an error
+repo_keep_days: 14
+```
+
 ## Queue and runners
 
 Accepted events become jobs. A job is named after its repository (`github/owner/repo`): jobs with the

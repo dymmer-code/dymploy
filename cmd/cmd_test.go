@@ -4,9 +4,15 @@ import (
 	"bytes"
 	"context"
 	"crypto/hmac"
+	"crypto/rand"
+	"crypto/rsa"
 	"crypto/sha256"
+	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
+	"encoding/pem"
+	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -14,6 +20,10 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	bolt "go.etcd.io/bbolt"
+
+	"github.com/dymmer-code/dymploy/internal/checkout"
 )
 
 func run(t *testing.T, ctx context.Context, args ...string) (stdout, stderr string, err error) {
@@ -393,5 +403,182 @@ func TestServeCannotUseAFileAsLogDirectory(t *testing.T) {
 	}
 	if err := serveFails(t, cfg); !strings.Contains(err.Error(), "log directory") {
 		t.Fatalf("%v", err)
+	}
+}
+
+// --- cloning private repositories ---
+
+func writeAppKey(t *testing.T, dir string, mode os.FileMode) string {
+	t.Helper()
+	k, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := filepath.Join(dir, "app.pem")
+	pemBytes := pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(k)})
+	if err := os.WriteFile(p, pemBytes, mode); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(p, mode); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+// withApp rewrites a config produced by hookConfig so the github webhook also has app settings.
+func withApp(t *testing.T, cfg, keyPath string) {
+	t.Helper()
+	b, _ := os.ReadFile(cfg)
+	out := strings.Replace(string(b), "webhooks:\n  github:\n", "webhooks:\n  github:\n    app_id: 4242\n    private_key_file: "+keyPath+"\n", 1)
+	if err := os.WriteFile(cfg, []byte(out), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestACloneJobWithoutAnAppFailsWithAnExplanation(t *testing.T) {
+	dir := tmpDir(t)
+	addr := freeAddr(t)
+	stop := startWith(t, hookConfig(t, dir, addr, "runner:\n  kind: clone\n"), filepath.Join(dir, "c.sock"))
+	defer stop()
+	if r := signedPush(t, addr, "clone-1", "shop", "refs/heads/main", hookSecret); r.StatusCode != 202 {
+		t.Fatalf("got %d", r.StatusCode)
+	}
+	story := waitForLog(t, filepath.Join(dir, "data"), "job finished: failed")
+	if !strings.Contains(story, "no app is configured") {
+		t.Fatalf("the log must say why a private repository cannot be cloned:\n%s", story)
+	}
+}
+
+func TestServeStartsWithAnAppConfigured(t *testing.T) {
+	dir := tmpDir(t)
+	cfg := hookConfig(t, dir, freeAddr(t), "runner:\n  kind: clone\n")
+	withApp(t, cfg, writeAppKey(t, dir, 0o600))
+	stop := startWith(t, cfg, filepath.Join(dir, "c.sock"))
+	stop()
+}
+
+func TestServeRefusesAWorldReadableAppKey(t *testing.T) {
+	dir := tmpDir(t)
+	cfg := hookConfig(t, dir, freeAddr(t), "")
+	withApp(t, cfg, writeAppKey(t, dir, 0o644))
+	if err := serveFails(t, cfg); !strings.Contains(err.Error(), "chmod") {
+		t.Fatalf("%v", err)
+	}
+}
+
+func TestServeRefusesAnUnusableAppKey(t *testing.T) {
+	dir := tmpDir(t)
+	cfg := hookConfig(t, dir, freeAddr(t), "")
+	bad := filepath.Join(dir, "bad.pem")
+	if err := os.WriteFile(bad, []byte("not a key\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	withApp(t, cfg, bad)
+	if err := serveFails(t, cfg); !strings.Contains(err.Error(), "private_key_file") {
+		t.Fatalf("%v", err)
+	}
+}
+
+// --- housekeeping and degraded environments ---
+
+func TestRunEveryStopsWithItsContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	calls := make(chan struct{}, 100)
+	done := make(chan struct{})
+	go func() { runEvery(ctx, 5*time.Millisecond, func() { calls <- struct{}{} }); close(done) }()
+	<-calls
+	<-calls
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the loop must end with its context")
+	}
+}
+
+func TestCleanOnceRemovesOldCopiesAndSurvivesErrors(t *testing.T) {
+	root := filepath.Join(tmpDir(t), "repos")
+	m, err := checkout.New(checkout.Config{Root: root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := filepath.Join(root, "github", "acme", "old", ".git")
+	if err := os.MkdirAll(old, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(old, "dymploy-used")
+	if err := os.WriteFile(marker, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	long := time.Now().Add(-90 * 24 * time.Hour)
+	_ = os.Chtimes(marker, long, long)
+	var logs bytes.Buffer
+	log := slog.New(slog.NewTextHandler(&logs, nil))
+	cleanOnce(context.Background(), m, 30*24*time.Hour, log)
+	if _, err := os.Stat(filepath.Join(root, "github", "acme", "old")); err == nil {
+		t.Fatal("an old unused working copy must be removed")
+	}
+	if !strings.Contains(logs.String(), "removed") {
+		t.Fatalf("%s", logs.String())
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	os.MkdirAll(filepath.Join(root, "github", "acme", "x"), 0o700)
+	logs.Reset()
+	cleanOnce(ctx, m, time.Hour, log)
+	if !strings.Contains(logs.String(), "failed") {
+		t.Fatalf("a failing clean-up is logged, not fatal: %q", logs.String())
+	}
+}
+
+func TestWithoutGitServeStillRunsOtherJobs(t *testing.T) {
+	t.Setenv("PATH", "/nonexistent")
+	dir := tmpDir(t)
+	stop := startWith(t, hookConfig(t, dir, freeAddr(t), ""), filepath.Join(dir, "c.sock"))
+	stop()
+}
+
+func TestWithoutGitTheCloneRunnerIsRefused(t *testing.T) {
+	t.Setenv("PATH", "/nonexistent")
+	dir := tmpDir(t)
+	cfg := hookConfig(t, dir, freeAddr(t), "runner:\n  kind: clone\n")
+	if err := serveFails(t, cfg); !strings.Contains(err.Error(), "git") {
+		t.Fatalf("%v", err)
+	}
+}
+
+func TestCleanReposReturnsWhenItsContextEnds(t *testing.T) {
+	m, err := checkout.New(checkout.Config{Root: filepath.Join(tmpDir(t), "r")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	done := make(chan struct{})
+	go func() { cleanRepos(ctx, m, time.Hour, slog.New(slog.NewTextHandler(io.Discard, nil))); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("cleanRepos must stop with its context")
+	}
+}
+
+func TestServeReportsCorruptedState(t *testing.T) {
+	dir := tmpDir(t)
+	cfg := hookConfig(t, dir, freeAddr(t), "")
+	if err := os.MkdirAll(filepath.Join(dir, "data", "state"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	db, err := bolt.Open(filepath.Join(dir, "data", "state", "jobs.db"), 0o600, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = db.Update(func(tx *bolt.Tx) error {
+		b, _ := tx.CreateBucketIfNotExists([]byte("jobs"))
+		return b.Put([]byte("zzz-broken"), []byte("{this is not json"))
+	})
+	db.Close()
+	if err := serveFails(t, cfg); !strings.Contains(err.Error(), "recovering") {
+		t.Fatalf("a damaged state must stop the daemon with a clear message: %v", err)
 	}
 }
