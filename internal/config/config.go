@@ -42,6 +42,8 @@ type Config struct {
 	Runner RunnerConfig `yaml:"runner"`
 	// RepoKeepDays removes working copies of repositories not used for this many days; 0 keeps them.
 	RepoKeepDays int `yaml:"repo_keep_days"`
+	// ArtifactKeepDays removes the artifacts of builds older than this many days; 0 keeps them.
+	ArtifactKeepDays int `yaml:"artifact_keep_days"`
 }
 
 // QueueConfig sets the limits of the job queue.
@@ -116,9 +118,10 @@ func Default() *Config {
 		WebhookMaxBody:       5 << 20,
 		WebhookRatePerMinute: 600,
 
-		RepoKeepDays: 14,
-		Queue:        QueueConfig{MaxConcurrent: 2, MaxPending: 1000, OnBusy: "queue", LogMaxBytes: 10 << 20, KeepJobs: 500, KeepDays: 30},
-		Runner:       RunnerConfig{Kind: "dryrun"},
+		RepoKeepDays:     14,
+		ArtifactKeepDays: 14,
+		Queue:            QueueConfig{MaxConcurrent: 2, MaxPending: 1000, OnBusy: "queue", LogMaxBytes: 10 << 20, KeepJobs: 500, KeepDays: 30},
+		Runner:           RunnerConfig{Kind: "dryrun"},
 	}
 }
 
@@ -151,8 +154,8 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("%s %q must be an absolute path", name, p)
 		}
 	}
-	if c.RepoKeepDays < 0 {
-		return errors.New("repo_keep_days must not be negative")
+	if c.RepoKeepDays < 0 || c.ArtifactKeepDays < 0 {
+		return errors.New("repo_keep_days and artifact_keep_days must not be negative")
 	}
 	if c.WebhookMaxBody < 0 || c.WebhookRatePerMinute < 0 {
 		return errors.New("webhook_max_body_bytes and webhook_rate_per_minute must not be negative")

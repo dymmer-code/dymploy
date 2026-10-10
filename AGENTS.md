@@ -17,6 +17,8 @@ module `github.com/dymmer-code/dymploy`). Design notes are in the `docs` directo
   secrets never go in logs, URLs or `.git/config`; files holding secrets are 0600.
 - **Provider independence**: anything specific to GitHub (or any provider) lives behind the `Provider`
   interface; no other package may import provider types.
+- **Container independence**: only `internal/runner/docker` (and `cmd`, which wires it) knows about containers.
+  `internal/architecture` fails the build otherwise. Tests against a real Docker use `-tags integration`.
 - **Strict configuration**: unknown keys are an error.
 
 ## Not in scope here

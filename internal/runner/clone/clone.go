@@ -40,30 +40,42 @@ type params struct {
 
 // Run implements runner.Runner.
 func (r *Runner) Run(ctx context.Context, t runner.Task) (runner.Result, error) {
+	co, _, err := r.Prepare(ctx, t)
+	if err != nil {
+		return runner.Result{}, err
+	}
+	co.Release()
+	return runner.Result{}, nil
+}
+
+// Prepare does what the runner does but hands the working copy to the caller, who must Release it.
+// Runners that build on a checkout (the Docker one) start from here, so what an event means and how
+// its repository is fetched are decided in one place.
+func (r *Runner) Prepare(ctx context.Context, t runner.Task) (*checkout.Checkout, provider.Event, error) {
 	var p params
 	if len(t.Params) > 0 {
 		dec := json.NewDecoder(bytes.NewReader(t.Params))
 		dec.DisallowUnknownFields()
 		if err := dec.Decode(&p); err != nil {
-			return runner.Result{}, fmt.Errorf("the clone runner's params are invalid: %w", err)
+			return nil, provider.Event{}, fmt.Errorf("the runner's params are invalid: %w", err)
 		}
 	}
 	var ev provider.Event
 	if err := json.Unmarshal(t.Input, &ev); err != nil {
-		return runner.Result{}, fmt.Errorf("the job input is not a repository event: %w", err)
+		return nil, ev, fmt.Errorf("the job input is not a repository event: %w", err)
 	}
 	if ev.Commit == "" || ev.Owner == "" || ev.Repo == "" || ev.Provider == "" {
-		return runner.Result{}, errors.New("the job input lacks provider, owner, repository or commit")
+		return nil, ev, errors.New("the job input lacks provider, owner, repository or commit")
 	}
 	cloner, ok := r.find(ev.Provider)
 	if !ok {
-		return runner.Result{}, fmt.Errorf("provider %q cannot clone repositories", ev.Provider)
+		return nil, ev, fmt.Errorf("provider %q cannot clone repositories", ev.Provider)
 	}
 
 	t.Log.System(fmt.Sprintf("preparing %s/%s at %.12s", ev.Owner, ev.Repo, ev.Commit))
 	creds, err := cloner.CloneCredentials(ctx, &ev)
 	if err != nil {
-		return runner.Result{}, fmt.Errorf("getting read-only credentials: %w", err)
+		return nil, ev, fmt.Errorf("getting read-only credentials: %w", err)
 	}
 	co, err := r.mgr.Acquire(ctx, checkout.Request{
 		Provider: ev.Provider, Owner: ev.Owner, Repo: ev.Repo,
@@ -73,9 +85,8 @@ func (r *Runner) Run(ctx context.Context, t runner.Task) (runner.Result, error) 
 		Report: t.Log.System,
 	})
 	if err != nil {
-		return runner.Result{}, err
+		return nil, ev, err
 	}
-	defer co.Release()
 	t.Log.System(fmt.Sprintf("checked out %.12s in %s", co.Commit, co.Dir))
-	return runner.Result{}, nil
+	return co, ev, nil
 }

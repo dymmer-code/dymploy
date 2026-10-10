@@ -16,6 +16,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -680,5 +681,90 @@ func TestSchemaCommandPrintsTheJSONSchema(t *testing.T) {
 	var s map[string]any
 	if json.Unmarshal([]byte(out), &s) != nil || s["title"] != "dymploy.yaml" {
 		t.Fatalf("%.80s", out)
+	}
+}
+
+// fakeDockerOnPath puts a docker command in the PATH, next to the real git, and returns its directory.
+func fakeDockerOnPath(t *testing.T) {
+	t.Helper()
+	bin := t.TempDir()
+	if err := os.WriteFile(filepath.Join(bin, "docker"), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	git, err := exec.LookPath("git")
+	if err != nil {
+		t.Skip("git is required")
+	}
+	if err := os.Symlink(git, filepath.Join(bin, "git")); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin)
+}
+
+func TestTheDockerRunnerIsAvailableWhenDockerIs(t *testing.T) {
+	fakeDockerOnPath(t)
+	dir := tmpDir(t)
+	stop := startWith(t, hookConfig(t, dir, freeAddr(t), "runner:\n  kind: docker\n"), filepath.Join(dir, "c.sock"))
+	stop()
+}
+
+func TestWithoutDockerTheDockerRunnerIsRefusedButOtherJobsStillRun(t *testing.T) {
+	git, err := exec.LookPath("git")
+	if err != nil {
+		t.Skip("git is required")
+	}
+	bin := t.TempDir()
+	os.Symlink(git, filepath.Join(bin, "git"))
+	t.Setenv("PATH", bin)
+	dir := tmpDir(t)
+	if err := serveFails(t, hookConfig(t, dir, freeAddr(t), "runner:\n  kind: docker\n")); !strings.Contains(err.Error(), "docker") {
+		t.Fatalf("%v", err)
+	}
+	dir = tmpDir(t)
+	stop := startWith(t, hookConfig(t, dir, freeAddr(t), ""), filepath.Join(dir, "c.sock"))
+	stop()
+}
+
+func TestWithoutGitTheDockerRunnerIsRefused(t *testing.T) {
+	t.Setenv("PATH", "/nonexistent")
+	dir := tmpDir(t)
+	if err := serveFails(t, hookConfig(t, dir, freeAddr(t), "runner:\n  kind: docker\n")); !strings.Contains(err.Error(), "git") {
+		t.Fatalf("%v", err)
+	}
+}
+
+func TestCleanArtifactsOnceRemovesOldBuildsAndSurvivesErrors(t *testing.T) {
+	dir := filepath.Join(tmpDir(t), "artifacts")
+	old := filepath.Join(dir, "job-old")
+	os.MkdirAll(old, 0o700)
+	long := time.Now().Add(-90 * 24 * time.Hour)
+	_ = os.Chtimes(old, long, long)
+	var logs bytes.Buffer
+	log := slog.New(slog.NewTextHandler(&logs, nil))
+	cleanArtifactsOnce(dir, 30*24*time.Hour, log)
+	if _, err := os.Stat(old); err == nil || !strings.Contains(logs.String(), "removed") {
+		t.Fatalf("an old build's artifacts must go: %v %q", err, logs.String())
+	}
+	file := filepath.Join(tmpDir(t), "f")
+	os.WriteFile(file, nil, 0o600)
+	logs.Reset()
+	cleanArtifactsOnce(file, time.Hour, log)
+	if !strings.Contains(logs.String(), "failed") {
+		t.Fatalf("a failing clean-up is logged, not fatal: %q", logs.String())
+	}
+}
+
+func TestCleanArtifactsStopsWithItsContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	done := make(chan struct{})
+	go func() {
+		cleanArtifacts(ctx, t.TempDir(), time.Hour, slog.New(slog.NewTextHandler(io.Discard, nil)))
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("cleanArtifacts must stop with its context")
 	}
 }

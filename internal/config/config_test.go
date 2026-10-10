@@ -215,6 +215,13 @@ repo_keep_days: 7
 	}
 }
 
+func TestArtifactKeepDaysDefaultsToTwoWeeks(t *testing.T) {
+	c, _ := Load(write(t, ""))
+	if c.ArtifactKeepDays != 14 {
+		t.Fatal(c.ArtifactKeepDays)
+	}
+}
+
 func TestRepoKeepDaysDefault(t *testing.T) {
 	c, _ := Load(write(t, ""))
 	if c.RepoKeepDays != 14 {
@@ -225,11 +232,12 @@ func TestRepoKeepDaysDefault(t *testing.T) {
 func TestAppSettingsValidation(t *testing.T) {
 	base := "webhooks:\n  github:\n    secret_file: /s\n"
 	for name, body := range map[string]string{
-		"app id without key":      base + "    app_id: 1\n",
-		"key without app id":      base + "    private_key_file: /k\n",
-		"relative key":            base + "    app_id: 1\n    private_key_file: k.pem\n",
-		"negative app id":         base + "    app_id: -1\n    private_key_file: /k\n",
-		"negative repo keep days": "repo_keep_days: -1\n",
+		"app id without key":          base + "    app_id: 1\n",
+		"key without app id":          base + "    private_key_file: /k\n",
+		"relative key":                base + "    app_id: 1\n    private_key_file: k.pem\n",
+		"negative app id":             base + "    app_id: -1\n    private_key_file: /k\n",
+		"negative repo keep days":     "repo_keep_days: -1\n",
+		"negative artifact keep days": "artifact_keep_days: -1\n",
 	} {
 		t.Run(name, func(t *testing.T) {
 			if _, err := Load(write(t, body)); err == nil {

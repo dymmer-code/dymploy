@@ -152,8 +152,36 @@ The queue does not know how work is done. It hands each job to the **runner** re
 `kind` through the contract in `internal/runner`: the runner receives opaque `Params` (from the
 configuration) and `Input` (the event), narrates the execution continuously through a `Reporter`
 (stdout, stderr and system steps, in order) and returns an exit code or an error. Docker is just one
-implementation of that contract. Today only `dryrun` exists (it executes nothing and says what it
-would do), which lets the whole chain be checked without side effects.
+implementation of that contract. `dryrun` executes nothing and says what it would do, which lets the
+whole chain be checked without side effects; `clone` checks out the commit; `docker` builds it.
+
+## Building in Docker
+
+`runner.kind: docker` clones the commit like `clone`, reads `dymploy.yaml` from it (see `dymploy validate`),
+runs each `build.steps` entry in its own container and packs `artifact` into
+`<data_dir>/artifacts/<job id>/<name>.tar.gz`, logging its size and SHA-256. It needs the `docker` command and
+a reachable engine (checked at every job, so Docker can be started after dymploy). `params` are the same as `clone`'s.
+
+- The repository is mounted at `/work`; steps run with `sh -ec`, as the daemon's own uid:gid (so what they write
+  can be read and cleaned up) with `HOME=/tmp`. Declare `build.cache` for anything that must survive between builds
+  (`<data_dir>/cache/<provider>/<owner>/<repo>/<name>`, mode 0700).
+- Containers are unprivileged: all capabilities dropped, `no-new-privileges`, bounded processes, no swap, no
+  access to the Docker socket, no devices, no published ports. `build.network: none` removes the network.
+  `build.limits` sets cpus, memory and the time limit; exceeding the time makes the job fail with exit code 124.
+- Environment: `build.env`, then the step's `env`, then `DYMPLOY_COMMIT`, `DYMPLOY_SHORT_COMMIT`, `DYMPLOY_OWNER`,
+  `DYMPLOY_REPO`, `DYMPLOY_JOB` and `DYMPLOY_BRANCH` or `DYMPLOY_TAG`, which always win. No secret of the server is passed.
+- `build.image.dockerfile` builds an image for the job (and removes it afterwards); `from` pulls one. Both must stay
+  inside the repository: links that lead out are refused.
+- The artifact stores each path under its base name; links must be relative and stay inside what is packed, special
+  files are refused, owners are normalized and the order is fixed, so the same tree gives the same archive.
+  `artifact_keep_days` (default 14) removes old ones.
+- Exit codes of a job that failed for reasons of the repository: 2 invalid or missing `dymploy.yaml`, 3 the build
+  worked but the artifact could not be packed, 124 time limit, anything else is the failing step's own code. An
+  engine that is down, an image that cannot be pulled or a cancelled job are errors of the runner instead.
+
+Nothing outside `internal/runner/docker` knows about containers (`internal/architecture` enforces it). Tests against a
+real engine are tagged: `go test -tags integration ./internal/runner/docker/` (set `DYMPLOY_IT_DIR` under your home when
+the engine runs in a VM such as Colima).
 
 ## Development
 

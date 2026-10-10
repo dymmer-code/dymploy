@@ -4,15 +4,18 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"os"
 	"os/signal"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
 
+	"github.com/dymmer-code/dymploy/internal/artifact"
 	"github.com/dymmer-code/dymploy/internal/checkout"
 	"github.com/dymmer-code/dymploy/internal/config"
 	"github.com/dymmer-code/dymploy/internal/daemon"
@@ -23,6 +26,7 @@ import (
 	"github.com/dymmer-code/dymploy/internal/queue"
 	"github.com/dymmer-code/dymploy/internal/runner"
 	"github.com/dymmer-code/dymploy/internal/runner/clone"
+	"github.com/dymmer-code/dymploy/internal/runner/docker"
 	"github.com/dymmer-code/dymploy/internal/runner/dryrun"
 	"github.com/dymmer-code/dymploy/internal/secret"
 	"github.com/dymmer-code/dymploy/internal/webhook"
@@ -62,6 +66,10 @@ func newServeCmd(version string) *cobra.Command {
 				go cleanRepos(pruneCtx, repos, time.Duration(cfg.RepoKeepDays)*24*time.Hour, log)
 			}
 
+			if cfg.ArtifactKeepDays > 0 {
+				go cleanArtifacts(pruneCtx, filepath.Join(cfg.DataDir, "artifacts"), time.Duration(cfg.ArtifactKeepDays)*24*time.Hour, log)
+			}
+
 			hooks := buildReceiver(cfg, log, providers, intake.New(mgr, cfg.Runner.Kind, cfg.Runner.ParamsJSON()))
 			d := daemon.New(cfg, version)
 			if hooks != nil {
@@ -98,9 +106,15 @@ func buildQueue(cfg *config.Config, log *slog.Logger, providers map[string]provi
 			c, ok := providers[name].(provider.Cloner)
 			return c, ok
 		}
-		runners.MustRegister(clone.Kind, clone.New(repos, finder))
-	case cfg.Runner.Kind == clone.Kind:
-		return nil, nil, nil, fmt.Errorf("runner.kind %q needs git: %w", clone.Kind, err)
+		cl := clone.New(repos, finder)
+		runners.MustRegister(clone.Kind, cl)
+		if err := registerDocker(runners, cl, cfg); err != nil && cfg.Runner.Kind == docker.Kind {
+			return nil, nil, nil, fmt.Errorf("runner.kind %q: %w", docker.Kind, err)
+		} else if err != nil {
+			log.Warn("docker is not available: build jobs cannot run", "error", err)
+		}
+	case cfg.Runner.Kind == clone.Kind || cfg.Runner.Kind == docker.Kind:
+		return nil, nil, nil, fmt.Errorf("runner.kind %q needs git: %w", cfg.Runner.Kind, err)
 	default:
 		log.Warn("git is not available: jobs that clone repositories cannot run", "error", err)
 		repos = nil
@@ -125,6 +139,46 @@ func buildQueue(cfg *config.Config, log *slog.Logger, providers map[string]provi
 		return nil, nil, nil, err
 	}
 	return mgr, repos, func() { store.Close() }, nil
+}
+
+// registerDocker adds the build runner, which needs the docker command and works on top of the clone
+// runner's checkouts. The engine itself is only contacted when a job runs.
+func registerDocker(runners *runner.Registry, cl *clone.Runner, cfg *config.Config) error {
+	engine, err := docker.NewCLI("")
+	if err != nil {
+		return err
+	}
+	source := func(ctx context.Context, t runner.Task) (string, func(), provider.Event, error) {
+		co, ev, err := cl.Prepare(ctx, t)
+		if err != nil {
+			return "", nil, ev, err
+		}
+		return co.Dir, co.Release, ev, nil
+	}
+	run, err := docker.New(docker.Config{
+		Engine: engine, Source: source,
+		ArtifactsDir: filepath.Join(cfg.DataDir, "artifacts"), CacheDir: filepath.Join(cfg.DataDir, "cache"),
+		User: strconv.Itoa(os.Getuid()) + ":" + strconv.Itoa(os.Getgid()),
+	})
+	if err != nil {
+		return err
+	}
+	runners.MustRegister(docker.Kind, run)
+	return nil
+}
+
+// cleanArtifacts removes the artifacts of old builds, once an hour.
+func cleanArtifacts(ctx context.Context, dir string, olderThan time.Duration, log *slog.Logger) {
+	runEvery(ctx, time.Hour, func() { cleanArtifactsOnce(dir, olderThan, log) })
+}
+
+func cleanArtifactsOnce(dir string, olderThan time.Duration, log *slog.Logger) {
+	switch n, err := artifact.Clean(dir, olderThan); {
+	case err != nil:
+		log.Warn("cleaning old artifacts failed", "error", err)
+	case n > 0:
+		log.Info("old artifacts removed", "removed", n)
+	}
 }
 
 // cleanRepos removes working copies nobody has used for a while, once an hour.
