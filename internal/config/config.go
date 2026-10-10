@@ -3,6 +3,7 @@ package config
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -34,6 +35,42 @@ type Config struct {
 	WebhookMaxBody int64 `yaml:"webhook_max_body_bytes"`
 	// WebhookRatePerMinute limits webhook requests per minute across all providers; 0 disables it.
 	WebhookRatePerMinute int `yaml:"webhook_rate_per_minute"`
+
+	// Queue sets the job limits and how long history is kept.
+	Queue QueueConfig `yaml:"queue"`
+	// Runner is how the jobs started by webhooks are executed.
+	Runner RunnerConfig `yaml:"runner"`
+}
+
+// QueueConfig sets the limits of the job queue.
+type QueueConfig struct {
+	// MaxConcurrent is how many jobs run at once; jobs with the same name never overlap.
+	MaxConcurrent int `yaml:"max_concurrent"`
+	// MaxPending is how many jobs may wait before new ones are refused.
+	MaxPending int `yaml:"max_pending"`
+	// OnBusy is what happens to a new job whose name is already waiting or running:
+	// queue (wait), coalesce (replace the waiting one) or reject.
+	OnBusy string `yaml:"on_busy"`
+	// LogMaxBytes caps the log of each job.
+	LogMaxBytes int64 `yaml:"log_max_bytes"`
+	// KeepJobs and KeepDays bound the history of finished jobs; 0 disables each limit.
+	KeepJobs int `yaml:"keep_jobs"`
+	KeepDays int `yaml:"keep_days"`
+}
+
+// RunnerConfig selects the runner for webhook jobs and carries its configuration, which nothing
+// but that runner interprets.
+type RunnerConfig struct {
+	Kind   string         `yaml:"kind"`
+	Params map[string]any `yaml:"params"`
+}
+
+// ParamsJSON returns Params as the opaque JSON the queue transports; nil when there are none.
+func (r RunnerConfig) ParamsJSON() (json.RawMessage, error) {
+	if len(r.Params) == 0 {
+		return nil, nil
+	}
+	return json.Marshal(r.Params)
 }
 
 // WebhookConfig is the authentication setup of one provider.
@@ -61,6 +98,9 @@ func Default() *Config {
 
 		WebhookMaxBody:       5 << 20,
 		WebhookRatePerMinute: 600,
+
+		Queue:  QueueConfig{MaxConcurrent: 2, MaxPending: 1000, OnBusy: "queue", LogMaxBytes: 10 << 20, KeepJobs: 500, KeepDays: 30},
+		Runner: RunnerConfig{Kind: "dryrun"},
 	}
 }
 
@@ -96,6 +136,12 @@ func (c *Config) Validate() error {
 	if c.WebhookMaxBody < 0 || c.WebhookRatePerMinute < 0 {
 		return errors.New("webhook_max_body_bytes and webhook_rate_per_minute must not be negative")
 	}
+	if err := c.Queue.validate(); err != nil {
+		return err
+	}
+	if c.Runner.Kind == "" {
+		return errors.New("runner.kind must not be empty")
+	}
 	names := make([]string, 0, len(c.Webhooks))
 	for name := range c.Webhooks {
 		names = append(names, name)
@@ -110,6 +156,21 @@ func (c *Config) Validate() error {
 		if err := r.validate(c.Webhooks); err != nil {
 			return fmt.Errorf("policy[%d]: %w", i, err)
 		}
+	}
+	return nil
+}
+
+func (q QueueConfig) validate() error {
+	switch {
+	case q.MaxConcurrent < 1:
+		return errors.New("queue.max_concurrent must be at least 1")
+	case q.MaxPending < 0 || q.LogMaxBytes < 0 || q.KeepJobs < 0 || q.KeepDays < 0:
+		return errors.New("queue limits must not be negative")
+	}
+	switch q.OnBusy {
+	case "queue", "coalesce", "reject":
+	default:
+		return fmt.Errorf("queue.on_busy %q must be queue, coalesce or reject", q.OnBusy)
 	}
 	return nil
 }

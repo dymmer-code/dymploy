@@ -128,3 +128,72 @@ func TestPolicyValidation(t *testing.T) {
 		})
 	}
 }
+
+func TestQueueAndRunnerDefaults(t *testing.T) {
+	c, err := Load(write(t, ""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	q := c.Queue
+	if q.MaxConcurrent != 2 || q.MaxPending != 1000 || q.OnBusy != "queue" || q.LogMaxBytes != 10<<20 || q.KeepJobs != 500 || q.KeepDays != 30 {
+		t.Fatalf("%+v", q)
+	}
+	if c.Runner.Kind != "dryrun" || len(c.Runner.Params) != 0 {
+		t.Fatalf("until a real runner is configured, jobs are only reported: %+v", c.Runner)
+	}
+}
+
+func TestQueueAndRunnerOverrides(t *testing.T) {
+	c, err := Load(write(t, `
+queue:
+  max_concurrent: 4
+  max_pending: 50
+  on_busy: coalesce
+  log_max_bytes: 1048576
+  keep_jobs: 10
+  keep_days: 0
+runner:
+  kind: docker
+  params:
+    image: debian:13
+    nested: {list: [1, 2, {x: y}]}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Queue.MaxConcurrent != 4 || c.Queue.OnBusy != "coalesce" || c.Queue.KeepDays != 0 {
+		t.Fatalf("%+v", c.Queue)
+	}
+	if c.Runner.Kind != "docker" || c.Runner.Params["image"] != "debian:13" {
+		t.Fatalf("%+v", c.Runner)
+	}
+	raw, err := c.Runner.ParamsJSON()
+	if err != nil || string(raw) != `{"image":"debian:13","nested":{"list":[1,2,{"x":"y"}]}}` {
+		t.Fatalf("the parameters travel as opaque JSON: %s %v", raw, err)
+	}
+}
+
+func TestEmptyParamsAreNoParams(t *testing.T) {
+	raw, err := (RunnerConfig{Kind: "x"}).ParamsJSON()
+	if err != nil || raw != nil {
+		t.Fatalf("%q %v", raw, err)
+	}
+}
+
+func TestQueueValidation(t *testing.T) {
+	for name, body := range map[string]string{
+		"no concurrency":   "queue:\n  max_concurrent: 0\n",
+		"negative pending": "queue:\n  max_pending: -1\n",
+		"unknown policy":   "queue:\n  on_busy: sometimes\n",
+		"negative log cap": "queue:\n  log_max_bytes: -1\n",
+		"negative keep":    "queue:\n  keep_jobs: -1\n",
+		"negative days":    "queue:\n  keep_days: -1\n",
+		"empty runner":     "runner:\n  kind: \"\"\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := Load(write(t, body)); err == nil {
+				t.Fatalf("must be rejected:\n%s", body)
+			}
+		})
+	}
+}

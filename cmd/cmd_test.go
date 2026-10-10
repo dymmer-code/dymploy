@@ -275,3 +275,123 @@ func TestServeRefusesAnUnsupportedProvider(t *testing.T) {
 		t.Fatalf("an unknown provider must be named in the error, got %v", err)
 	}
 }
+
+func waitForLog(t *testing.T, dataDir, substr string) string {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		files, _ := filepath.Glob(filepath.Join(dataDir, "logs", "*.jsonl"))
+		for _, f := range files {
+			if b, _ := os.ReadFile(f); strings.Contains(string(b), substr) {
+				return string(b)
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("no job log with %q under %s (files: %v)", substr, dataDir, files)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+func TestAcceptedPushRunsAsAJobAndLeavesItsStory(t *testing.T) {
+	dir := tmpDir(t)
+	addr := freeAddr(t)
+	stop := startWith(t, hookConfig(t, dir, addr, ""), filepath.Join(dir, "c.sock"))
+	defer stop()
+	if r := signedPush(t, addr, "run-1", "shop", "refs/heads/main", hookSecret); r.StatusCode != 202 {
+		t.Fatalf("got %d", r.StatusCode)
+	}
+	story := waitForLog(t, filepath.Join(dir, "data"), "job finished: succeeded")
+	for _, want := range []string{"job started", "dry run", "acme/shop", "nothing was executed"} {
+		if !strings.Contains(story, want) {
+			t.Fatalf("the job log must say %q:\n%s", want, story)
+		}
+	}
+	for _, p := range []string{"state/jobs.db"} {
+		fi, err := os.Stat(filepath.Join(dir, "data", p))
+		if err != nil || fi.Mode().Perm() != 0o600 {
+			t.Fatalf("%s: %v %v", p, fi, err)
+		}
+	}
+}
+
+func TestServeRefusesAnUnknownRunnerKind(t *testing.T) {
+	dir := tmpDir(t)
+	cfg := hookConfig(t, dir, freeAddr(t), "runner:\n  kind: podman\n")
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	_, _, err := run(t, ctx, "serve", "--config", cfg)
+	if err == nil || !strings.Contains(err.Error(), "podman") || !strings.Contains(err.Error(), "dryrun") {
+		t.Fatalf("name the bad kind and list the available ones: %v", err)
+	}
+}
+
+func TestOnlyOneDaemonOwnsTheState(t *testing.T) {
+	dir := tmpDir(t)
+	cfg := hookConfig(t, dir, freeAddr(t), "")
+	stop := startWith(t, cfg, filepath.Join(dir, "c.sock"))
+	defer stop()
+	cfg2 := hookConfig(t, dir, freeAddr(t), "") // same data_dir, other port
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	_, _, err := run(t, ctx, "serve", "--config", cfg2)
+	if err == nil {
+		t.Fatal("a second daemon on the same data directory must be refused")
+	}
+}
+
+// --- error paths of the composition root ---
+
+func TestStatusWithoutAConfigurationFileUsesTheDefaultSocket(t *testing.T) {
+	_, _, err := run(t, context.Background(), "status", "--config", filepath.Join(tmpDir(t), "absent.yaml"))
+	if err == nil || !strings.Contains(err.Error(), "/run/dymploy/control.sock") {
+		t.Fatalf("with no configuration the default socket is tried, and named in the error: %v", err)
+	}
+}
+
+func TestStatusWithABrokenConfiguration(t *testing.T) {
+	p := filepath.Join(tmpDir(t), "broken.yaml")
+	if err := os.WriteFile(p, []byte("listen: nope\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, _, err := run(t, context.Background(), "status", "--config", p)
+	if err == nil || !strings.Contains(err.Error(), "broken.yaml") {
+		t.Fatalf("a bad configuration must not be mistaken for a missing one: %v", err)
+	}
+}
+
+func serveFails(t *testing.T, cfg string) error {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	_, _, err := run(t, ctx, "serve", "--config", cfg)
+	if err == nil {
+		t.Fatal("serve was expected to fail")
+	}
+	return err
+}
+
+func TestServeCannotUseAFileAsDataDirectory(t *testing.T) {
+	dir := tmpDir(t)
+	cfg := hookConfig(t, dir, freeAddr(t), "")
+	if err := os.WriteFile(filepath.Join(dir, "data"), []byte("not a directory"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := serveFails(t, cfg); !strings.Contains(err.Error(), "state") {
+		t.Fatalf("the error must point at the state directory: %v", err)
+	}
+}
+
+func TestServeCannotUseAFileAsLogDirectory(t *testing.T) {
+	dir := tmpDir(t)
+	cfg := hookConfig(t, dir, freeAddr(t), "")
+	if err := os.MkdirAll(filepath.Join(dir, "data"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "data", "logs"), []byte("not a directory"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := serveFails(t, cfg); !strings.Contains(err.Error(), "log directory") {
+		t.Fatalf("%v", err)
+	}
+}

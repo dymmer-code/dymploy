@@ -64,7 +64,35 @@ Answers: `202` accepted · `200` ignored (ping, other events, deleted refs) or d
 `400` malformed · `401` not authenticated · `403` outside the policy · `405` not POST · `413` too large ·
 `429` rate limited · `503` queue full (retry).
 
-> The job queue is not built yet: accepted events are logged and dropped until it lands.
+## Queue and runners
+
+Accepted events become jobs. A job is named after its repository (`github/owner/repo`): jobs with the
+same name never run at the same time, and at most `queue.max_concurrent` run at once. Each job has a
+state (`queued`, `running`, `succeeded`, `failed`, `canceled`, `interrupted`), a history and a log
+(`<data_dir>/logs/<job>.jsonl`, one line per entry, written as it happens, capped at
+`queue.log_max_bytes`). State lives in `<data_dir>/state/jobs.db`; only one daemon may own it. Jobs that
+were running when the daemon stopped are marked `interrupted` (never repeated blindly); jobs that were
+waiting resume in order.
+
+```yaml
+queue:
+  max_concurrent: 2     # jobs running at once
+  max_pending: 1000     # jobs allowed to wait; beyond that webhooks get 503
+  on_busy: queue        # queue (wait) | coalesce (replace the waiting one) | reject
+  log_max_bytes: 10485760
+  keep_jobs: 500        # history bounds for finished jobs (0 = no limit)
+  keep_days: 30
+runner:
+  kind: dryrun          # how jobs are executed; see below
+  params: {}            # handed, untouched, to the runner: only the runner knows what it means
+```
+
+The queue does not know how work is done. It hands each job to the **runner** registered for its
+`kind` through the contract in `internal/runner`: the runner receives opaque `Params` (from the
+configuration) and `Input` (the event), narrates the execution continuously through a `Reporter`
+(stdout, stderr and system steps, in order) and returns an exit code or an error. Docker is just one
+implementation of that contract. Today only `dryrun` exists (it executes nothing and says what it
+would do), which lets the whole chain be checked without side effects.
 
 ## Development
 

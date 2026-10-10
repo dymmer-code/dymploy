@@ -205,6 +205,19 @@ func TestFullQueueIs503AndTheRetryIsAccepted(t *testing.T) {
 	}
 }
 
+func TestDroppedByPolicyIs200AndNotRetried(t *testing.T) {
+	f := newFixture(t)
+	f.q.err = ErrDropped
+	w := f.postFake(fakeBody("d1", "refs/heads/main"))
+	if w.Code != 200 || status(t, w) != "dropped" {
+		t.Fatalf("%d %s", w.Code, w.Body)
+	}
+	f.q.err = nil
+	if w := f.postFake(fakeBody("d1", "refs/heads/main")); w.Code != 202 {
+		t.Fatalf("a dropped delivery is released like any other that was not queued: %d", w.Code)
+	}
+}
+
 func TestOtherQueueErrorsAre500(t *testing.T) {
 	f := newFixture(t)
 	f.q.err = errors.New("disk on fire")
