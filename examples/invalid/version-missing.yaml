@@ -1,0 +1,6 @@
+# expect: version is required
+build:
+  image: {from: "debian:13"}
+  steps: [{run: make}]
+artifact:
+  paths: [out]

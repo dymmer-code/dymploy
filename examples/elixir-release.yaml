@@ -1,0 +1,50 @@
+# An Elixir release built for Debian 13 and deployed to the "production" target, with a way back.
+version: 1
+
+build:
+  image:
+    dockerfile: docker/Dockerfile.build      # erlang + elixir for debian 13; lives in this repository
+  env:
+    MIX_ENV: prod
+  cache:
+    - {name: hex,   path: /root/.hex}
+    - {name: mix,   path: /root/.mix}
+  limits: {cpus: 2, memory: 2g, timeout: 20m}
+  steps:
+    - name: dependencies
+      run: mix deps.get --only prod
+    - name: release
+      run: |
+        mix compile
+        mix release --overwrite
+
+artifact:
+  name: shop
+  paths: [_build/prod/rel/shop]
+
+deploy:
+  target: production                              # configured on the server: host, user, key and who may use it
+  steps:
+    - name: stop
+      run: sudo systemctl stop shop
+    - name: keep the previous release
+      run: |
+        rm -rf /srv/apps/shop.previous
+        mv /srv/apps/shop /srv/apps/shop.previous
+    - name: install
+      run: |
+        mkdir -p /srv/apps/shop
+        tar -xzf "$DYMPLOY_ARTIFACT" -C /srv/apps/shop --strip-components=1
+    - name: start
+      run: sudo systemctl start shop
+  check:
+    run: curl -fsS http://127.0.0.1:4022/healthz
+    attempts: 10
+    interval: 3s
+  rollback:                                  # without this section a failed deploy is NOT undone
+    steps:
+      - run: sudo systemctl stop shop || true
+      - run: |
+          rm -rf /srv/apps/shop
+          mv /srv/apps/shop.previous /srv/apps/shop
+      - run: sudo systemctl start shop

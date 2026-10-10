@@ -1,0 +1,7 @@
+# expect: artifact.paths[0]
+version: 1
+build:
+  image: {from: "debian:13"}
+  steps: [{run: make}]
+artifact:
+  paths: [../../etc/shadow]

@@ -64,6 +64,38 @@ Answers: `202` accepted · `200` ignored (ping, other events, deleted refs) or d
 `400` malformed · `401` not authenticated · `403` outside the policy · `405` not POST · `413` too large ·
 `429` rate limited · `503` queue full (retry).
 
+## The `dymploy.yaml` file
+
+Every repository that dymploy builds has a `dymploy.yaml` in its root. It says how to build (in Docker), what to
+pack, and where to deploy; see `examples/` for complete files (a release with rollback, a static site without
+one, a book). Check yours before pushing, and give your editor the schema:
+
+```sh
+dymploy validate            # looks for dymploy.yaml in the current directory; reports every problem at once
+dymploy validate path/to/dir-or-file
+dymploy schema > dymploy.schema.json   # JSON Schema for editor completion and validation
+```
+
+```yaml
+version: 1
+build:
+  image: {from: "debian:13"}        # or: {dockerfile: docker/Dockerfile.build}
+  steps:
+    - run: make
+artifact:
+  paths: [out/app]                  # stored in the tar.gz under its base name (app)
+deploy:
+  target: production                     # a NAME configured on the dymploy server, never a host or a user
+  steps:
+    - run: tar -xzf "$DYMPLOY_ARTIFACT" -C /srv/apps/app --strip-components=1
+  rollback:                         # optional: without it a failed deploy is NOT undone
+    steps:
+      - run: echo "how to go back"
+```
+
+The file is treated as untrusted: unknown keys, anchors and aliases are errors, every size is bounded, paths
+cannot leave the repository, and credentials and machines can never be written in it. The full reference is in `docs/dymploy-yaml.md`.
+
 ## Cloning repositories
 
 `runner.kind: clone` checks out the commit of the event in a working copy under `<data_dir>/repos/<provider>/<owner>/<repo>`

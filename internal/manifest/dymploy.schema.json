@@ -1,0 +1,110 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dymploy.dymmer.com/schema/dymploy-1.json",
+  "title": "dymploy.yaml",
+  "description": "How dymploy builds a repository in Docker, packs the result and deploys it. The file names a TARGET; what the target is (host, user, key, which repositories may use it) is configured on the dymploy server, never here.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "build", "artifact"],
+  "properties": {
+    "version": {"const": 1, "description": "Format version. Always 1 for now."},
+    "build": {"$ref": "#/$defs/build"},
+    "artifact": {"$ref": "#/$defs/artifact"},
+    "deploy": {"$ref": "#/$defs/deploy"}
+  },
+  "$defs": {
+    "duration": {"type": "string", "pattern": "^[0-9]+(\\.[0-9]+)?(ms|s|m|h)([0-9]+(\\.[0-9]+)?(ms|s|m))*$", "description": "A duration with a unit, such as 30s, 20m or 1h. A bare number is not accepted."},
+    "env": {"type": "object", "maxProperties": 100, "propertyNames": {"pattern": "^[A-Za-z_][A-Za-z0-9_]{0,99}$"}, "additionalProperties": {"type": "string", "maxLength": 4096}, "description": "Environment variables. Names starting with DYMPLOY_ are reserved."},
+    "relativePath": {"type": "string", "minLength": 1, "maxLength": 300, "pattern": "^[^/\\\\-][^\\\\]*$", "not": {"pattern": "(^|/)\\.\\.(/|$)"}, "description": "A relative path that stays inside its base."},
+    "run": {"type": "string", "minLength": 1, "maxLength": 8192, "description": "A shell script, run with `sh -ec`."},
+    "stepName": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9 ._:/-]{0,63}$"},
+    "build": {
+      "type": "object", "additionalProperties": false, "required": ["image", "steps"],
+      "properties": {
+        "image": {"$ref": "#/$defs/image"},
+        "env": {"$ref": "#/$defs/env"},
+        "steps": {"type": "array", "minItems": 1, "maxItems": 100, "items": {"$ref": "#/$defs/step"}},
+        "cache": {"type": "array", "items": {"$ref": "#/$defs/cache"}},
+        "limits": {"$ref": "#/$defs/limits"},
+        "network": {"enum": ["default", "none"], "default": "default", "description": "none cuts the network for every step."}
+      }
+    },
+    "image": {
+      "type": "object", "additionalProperties": false,
+      "description": "The build environment: pull an image (from) or build one from a Dockerfile of the repository. Exactly one of the two.",
+      "oneOf": [{"required": ["from"]}, {"required": ["dockerfile"]}],
+      "properties": {
+        "from": {"type": "string", "description": "An image reference such as debian:13 or asciidoctor/docker-asciidoctor:latest."},
+        "dockerfile": {"$ref": "#/$defs/relativePath"},
+        "context": {"type": "string", "description": "Build context, relative to the repository (default .)."},
+        "args": {"$ref": "#/$defs/env"}
+      }
+    },
+    "step": {
+      "type": "object", "additionalProperties": false, "required": ["run"],
+      "properties": {
+        "name": {"$ref": "#/$defs/stepName"},
+        "run": {"$ref": "#/$defs/run"},
+        "image": {"type": "string", "description": "Run this step in another image."},
+        "workdir": {"$ref": "#/$defs/relativePath"},
+        "env": {"$ref": "#/$defs/env"}
+      }
+    },
+    "cache": {
+      "type": "object", "additionalProperties": false, "required": ["name", "path"],
+      "properties": {
+        "name": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{0,62}$"},
+        "path": {"type": "string", "pattern": "^/[A-Za-z0-9._/-]{1,200}$", "description": "Absolute path inside the container, kept between builds."}
+      }
+    },
+    "limits": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "cpus": {"type": "number", "exclusiveMinimum": 0, "maximum": 64},
+        "memory": {"type": "string", "pattern": "^[1-9][0-9]{0,5}[kmg]$", "description": "For example 512m or 2g."},
+        "timeout": {"$ref": "#/$defs/duration", "description": "Default 30m, at most 4h."}
+      }
+    },
+    "artifact": {
+      "type": "object", "additionalProperties": false, "required": ["paths"],
+      "properties": {
+        "name": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$", "description": "Name of the tar.gz (default: the last element of the first path)."},
+        "paths": {"type": "array", "minItems": 1, "maxItems": 50, "items": {"$ref": "#/$defs/relativePath"}},
+        "exclude": {"type": "array", "maxItems": 50, "items": {"type": "string", "minLength": 1, "maxLength": 200}}
+      }
+    },
+    "deployStep": {
+      "type": "object", "additionalProperties": false, "required": ["run"],
+      "properties": {
+        "name": {"$ref": "#/$defs/stepName"},
+        "run": {"$ref": "#/$defs/run"},
+        "env": {"$ref": "#/$defs/env"}
+      }
+    },
+    "stepList": {
+      "type": "object", "additionalProperties": false, "required": ["steps"],
+      "properties": {"steps": {"type": "array", "minItems": 1, "maxItems": 100, "items": {"$ref": "#/$defs/deployStep"}}}
+    },
+    "check": {
+      "type": "object", "additionalProperties": false, "required": ["run"],
+      "properties": {
+        "run": {"$ref": "#/$defs/run"},
+        "attempts": {"type": "integer", "minimum": 1, "maximum": 120, "default": 5},
+        "interval": {"$ref": "#/$defs/duration", "description": "Between attempts. Default 3s."},
+        "timeout": {"$ref": "#/$defs/duration", "description": "For each attempt. Default 10s."}
+      }
+    },
+    "deploy": {
+      "type": "object", "additionalProperties": false, "required": ["target", "steps"],
+      "description": "Runs on the target, in order. The artifact is uploaded first and its path is in $DYMPLOY_ARTIFACT. A failing step stops the deploy and runs `rollback` if there is one; if there is none, nothing is undone.",
+      "properties": {
+        "target": {"type": "string", "pattern": "^[a-z][a-z0-9-]{0,62}$", "description": "The NAME of a target configured on the dymploy server."},
+        "timeout": {"$ref": "#/$defs/duration", "description": "For the whole deploy. Default 10m, at most 1h."},
+        "steps": {"type": "array", "minItems": 1, "maxItems": 100, "items": {"$ref": "#/$defs/deployStep"}},
+        "check": {"$ref": "#/$defs/check"},
+        "rollback": {"$ref": "#/$defs/stepList"},
+        "after": {"$ref": "#/$defs/stepList"}
+      }
+    }
+  }
+}

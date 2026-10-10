@@ -582,3 +582,103 @@ func TestServeReportsCorruptedState(t *testing.T) {
 		t.Fatalf("a damaged state must stop the daemon with a clear message: %v", err)
 	}
 }
+
+// --- validate and schema ---
+
+func writeManifest(t *testing.T, dir, name, body string) string {
+	t.Helper()
+	p := filepath.Join(dir, name)
+	if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+const goodManifest = `version: 1
+build:
+  image: {from: "debian:13"}
+  steps: [{run: make}]
+artifact:
+  paths: [out/app]
+deploy:
+  target: production
+  steps: [{run: "echo hi"}]
+`
+
+func TestValidateAcceptsAGoodFileAndSummarizesIt(t *testing.T) {
+	dir := tmpDir(t)
+	p := writeManifest(t, dir, "dymploy.yaml", goodManifest)
+	for _, arg := range []string{p, dir} { // a file, or the directory that holds it
+		out, _, err := run(t, context.Background(), "validate", arg)
+		if err != nil || !strings.Contains(out, "OK") || !strings.Contains(out, "deploy: production") || !strings.Contains(out, "rollback: none") {
+			t.Fatalf("%s: out=%q err=%v", arg, out, err)
+		}
+	}
+}
+
+func TestValidateReportsEveryProblem(t *testing.T) {
+	dir := tmpDir(t)
+	writeManifest(t, dir, "dymploy.yaml", "version: 1\nbuild:\n  image: {from: \"bad image\"}\n  network: host\n  steps: [{name: x}]\nartifact:\n  paths: [/abs]\n")
+	_, _, err := run(t, context.Background(), "validate", dir)
+	if err == nil {
+		t.Fatal("a bad file must fail")
+	}
+	for _, want := range []string{"dymploy.yaml", "build.image.from", "build.network", "build.steps[0].run", "artifact.paths[0]"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("missing %q in:\n%v", want, err)
+		}
+	}
+}
+
+func TestValidateChecksTheFilesItRefersTo(t *testing.T) {
+	dir := tmpDir(t)
+	writeManifest(t, dir, "dymploy.yaml", strings.Replace(goodManifest, `{from: "debian:13"}`, `{dockerfile: build/Dockerfile}`, 1))
+	if _, _, err := run(t, context.Background(), "validate", dir); err == nil || !strings.Contains(err.Error(), "build/Dockerfile") {
+		t.Fatalf("a missing Dockerfile is a problem you want to know before pushing: %v", err)
+	}
+	_ = os.MkdirAll(filepath.Join(dir, "build"), 0o755)
+	writeManifest(t, dir, "build/Dockerfile", "FROM debian:13\n")
+	if _, _, err := run(t, context.Background(), "validate", dir); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestValidateErrorsAboutTheFilesLocation(t *testing.T) {
+	dir := tmpDir(t)
+	if _, _, err := run(t, context.Background(), "validate", dir); err == nil || !strings.Contains(err.Error(), "dymploy.yaml") {
+		t.Fatalf("an empty directory has no manifest: %v", err)
+	}
+	writeManifest(t, dir, "dymploy.yaml", goodManifest)
+	writeManifest(t, dir, "dymploy.yml", goodManifest)
+	if _, _, err := run(t, context.Background(), "validate", dir); err == nil || !strings.Contains(err.Error(), "both") {
+		t.Fatalf("%v", err)
+	}
+	if _, _, err := run(t, context.Background(), "validate", filepath.Join(dir, "absent.yaml")); err == nil {
+		t.Fatal("a missing file must fail")
+	}
+}
+
+func TestValidateWithoutArgumentsLooksInTheCurrentDirectory(t *testing.T) {
+	dir := tmpDir(t)
+	writeManifest(t, dir, "dymploy.yaml", goodManifest)
+	old, _ := os.Getwd()
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chdir(old)
+	out, _, err := run(t, context.Background(), "validate")
+	if err != nil || !strings.Contains(out, "OK") {
+		t.Fatalf("%q %v", out, err)
+	}
+}
+
+func TestSchemaCommandPrintsTheJSONSchema(t *testing.T) {
+	out, _, err := run(t, context.Background(), "schema")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var s map[string]any
+	if json.Unmarshal([]byte(out), &s) != nil || s["title"] != "dymploy.yaml" {
+		t.Fatalf("%.80s", out)
+	}
+}

@@ -1,0 +1,17 @@
+# A book: each step can run in its own image, like services in a compose file. The artifact
+# (PDF and EPUB) is kept by dymploy; there is nothing to deploy over SSH.
+version: 1
+
+build:
+  image: {from: "debian:13"}
+  steps:
+    - name: pdf
+      image: asciidoctor/docker-asciidoctor:latest
+      run: asciidoctor-pdf -o out/book.pdf book.adoc
+    - name: epub
+      image: asciidoctor/docker-asciidoctor:latest
+      run: asciidoctor-epub3 -o out/book.epub book.adoc
+
+artifact:
+  name: book
+  paths: [out/book.pdf, out/book.epub]

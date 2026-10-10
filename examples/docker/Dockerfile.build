@@ -1,0 +1,14 @@
+# Build environment for the Elixir release example: Erlang and Elixir on Debian 13.
+# dymploy builds this image from the repository, then runs the build steps inside it.
+FROM debian:13
+
+ENV LANG=C.UTF-8 DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends build-essential ca-certificates curl erlang elixir git \
+ && rm -rf /var/lib/apt/lists/*
+
+# Hex and rebar are installed per build into the cached directories (see build.cache in dymploy.yaml).
+RUN mix local.hex --force && mix local.rebar --force
+
+WORKDIR /work

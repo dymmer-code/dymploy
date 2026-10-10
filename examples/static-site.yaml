@@ -1,0 +1,21 @@
+# A static site: built with Node, copied to the "web" target. No rollback section: if the copy
+# fails, dymploy reports it and leaves the state as it is.
+version: 1
+
+build:
+  image: {from: "node:22-bookworm"}
+  network: default
+  steps:
+    - run: npm ci
+    - run: npm run build
+
+artifact:
+  paths: [dist]
+
+deploy:
+  target: web
+  steps:
+    - name: publish
+      run: |
+        mkdir -p /srv/sites/example.org
+        tar -xzf "$DYMPLOY_ARTIFACT" -C /srv/sites/example.org --strip-components=1

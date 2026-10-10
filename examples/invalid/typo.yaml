@@ -1,0 +1,7 @@
+# expect: stepz
+version: 1
+build:
+  image: {from: "debian:13"}
+  stepz: [{run: make}]
+artifact:
+  paths: [out]
