@@ -2,18 +2,13 @@
 package config
 
 import (
-	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net"
-	"os"
 	"path"
 	"path/filepath"
 	"sort"
-
-	"gopkg.in/yaml.v3"
 )
 
 // Config is the daemon configuration. Everything that is specific to an installation
@@ -125,18 +120,33 @@ func Default() *Config {
 	}
 }
 
-// Load reads path, applies defaults and validates. Unknown keys are an error: a typo in a
-// security-relevant setting must not be silently ignored.
+// Load reads the main file at path and every config.d/*.yaml next to it, applies defaults and validates
+// the result. Unknown keys are an error: a typo in a security-relevant setting must not be silently
+// ignored. See merge for how the files are combined.
 func Load(path string) (*Config, error) {
-	raw, err := os.ReadFile(path)
+	files := []string{path}
+	extra, err := dropIns(path)
 	if err != nil {
-		return nil, fmt.Errorf("reading configuration %s: %w", path, err)
+		return nil, err
+	}
+	files = append(files, extra...)
+	srcs := make([]source, 0, len(files))
+	for _, f := range files {
+		s, err := readSource(f)
+		if err != nil {
+			return nil, err
+		}
+		srcs = append(srcs, s)
+	}
+	merged, err := merge(srcs)
+	if err != nil {
+		return nil, err
 	}
 	c := Default()
-	dec := yaml.NewDecoder(bytes.NewReader(raw))
-	dec.KnownFields(true)
-	if err := dec.Decode(c); err != nil && !errors.Is(err, io.EOF) {
-		return nil, fmt.Errorf("parsing configuration %s: %w", path, err)
+	if len(merged.Content) > 0 {
+		if err := merged.Decode(c); err != nil {
+			return nil, fmt.Errorf("configuration %s: %w", path, err)
+		}
 	}
 	if err := c.Validate(); err != nil {
 		return nil, fmt.Errorf("configuration %s: %w", path, err)

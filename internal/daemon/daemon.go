@@ -22,6 +22,7 @@ type Daemon struct {
 	version   string
 	startedAt time.Time
 	handlers  []route
+	reload    func() (string, error)
 }
 
 type route struct {
@@ -33,6 +34,12 @@ type route struct {
 // before Run.
 func (d *Daemon) Handle(pattern string, h http.Handler) *Daemon {
 	d.handlers = append(d.handlers, route{pattern, h})
+	return d
+}
+
+// OnReload sets what `dymploy reload` does. Call it before Run.
+func (d *Daemon) OnReload(f func() (string, error)) *Daemon {
+	d.reload = f
 	return d
 }
 
@@ -75,7 +82,7 @@ func (d *Daemon) Run(ctx context.Context, ready func(net.Addr)) error {
 	ctlReady := make(chan struct{})
 	ctlErr := make(chan error, 1)
 	go func() {
-		ctlErr <- control.Serve(ctx, d.cfg.ControlSocket, d.status, func() { close(ctlReady) })
+		ctlErr <- control.Serve(ctx, d.cfg.ControlSocket, control.Handlers{Status: d.status, Reload: d.reload}, func() { close(ctlReady) })
 	}()
 
 	select {

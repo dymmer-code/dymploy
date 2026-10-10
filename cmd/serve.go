@@ -71,7 +71,9 @@ func newServeCmd(version string) *cobra.Command {
 			}
 
 			hooks := buildReceiver(cfg, log, providers, intake.New(mgr, cfg.Runner.Kind, cfg.Runner.ParamsJSON()))
-			d := daemon.New(cfg, version)
+			rl := &reloader{path: configPath, cur: cfg, hooks: hooks, log: log}
+			reloadOnSIGHUP(ctx, rl)
+			d := daemon.New(cfg, version).OnReload(rl.Reload)
 			if hooks != nil {
 				d.Handle("/hooks/", hooks.Handler())
 			}
@@ -259,13 +261,9 @@ func buildReceiver(cfg *config.Config, log *slog.Logger, providers map[string]pr
 	if len(providers) == 0 {
 		return nil
 	}
-	rules := make([]webhook.Rule, len(cfg.Policy))
-	for i, r := range cfg.Policy {
-		rules[i] = webhook.Rule(r)
-	}
 	return &webhook.Receiver{
 		Providers: providers,
-		Policy:    webhook.Policy{Rules: rules},
+		Policy:    policyRules(cfg),
 		Queue:     q,
 		Dedupe:    webhook.NewDedupe(24*time.Hour, 10000),
 		Limiter:   webhook.NewLimiter(cfg.WebhookRatePerMinute, time.Minute),

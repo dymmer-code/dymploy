@@ -1,0 +1,6 @@
+# Secrets are files on this machine, referenced by path; they never come from a generated file.
+webhooks:
+  github:
+    secret_file: /etc/dymploy/github-webhook-secret
+    app_id: 123456
+    private_key_file: /etc/dymploy/github-app.pem

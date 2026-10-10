@@ -250,3 +250,18 @@ func TestLogsNeverContainSecretsOrPayloads(t *testing.T) {
 		}
 	}
 }
+
+func TestReplacingThePolicyAppliesToTheNextEvents(t *testing.T) {
+	f := newFixture(t)
+	if w := f.postFake(fakeBody("d1", "refs/heads/feature/x")); w.Code != 403 {
+		t.Fatalf("before: %d", w.Code)
+	}
+	f.rc.SetPolicy(Policy{Rules: []Rule{{Provider: "fake", Owner: "acme", Repositories: []string{"app"}, Branches: []string{"feature/*"}}}})
+	if w := f.postFake(fakeBody("d2", "refs/heads/feature/x")); w.Code != 202 {
+		t.Fatalf("after: %d %s", w.Code, w.Body)
+	}
+	f.rc.SetPolicy(Policy{})
+	if w := f.postFake(fakeBody("d3", "refs/heads/main")); w.Code != 403 {
+		t.Fatalf("an empty policy builds nothing: %d", w.Code)
+	}
+}

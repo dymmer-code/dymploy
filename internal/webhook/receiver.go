@@ -6,6 +6,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"sync/atomic"
 
 	"github.com/dymmer-code/dymploy/internal/provider"
 )
@@ -28,12 +29,25 @@ type Enqueuer interface {
 // Receiver serves POST /hooks/{provider}.
 type Receiver struct {
 	Providers map[string]provider.Provider
-	Policy    Policy
+	Policy    Policy // the initial policy; SetPolicy replaces it while running
 	Queue     Enqueuer
 	Dedupe    *Dedupe
 	Limiter   *Limiter
 	MaxBody   int64
 	Log       *slog.Logger
+
+	current atomic.Pointer[Policy]
+}
+
+// SetPolicy replaces the policy for the events that arrive from now on. It is safe to call while
+// the receiver is serving.
+func (rc *Receiver) SetPolicy(p Policy) { rc.current.Store(&p) }
+
+func (rc *Receiver) policy() Policy {
+	if p := rc.current.Load(); p != nil {
+		return *p
+	}
+	return rc.Policy
 }
 
 // Handler returns the HTTP handler for the webhook routes.
@@ -96,7 +110,7 @@ func (rc *Receiver) serve(w http.ResponseWriter, r *http.Request) {
 		log.Debug("webhook ignored", "why", "ref deleted")
 		return
 	}
-	if allowed, why := rc.Policy.Allow(ev); !allowed {
+	if allowed, why := rc.policy().Allow(ev); !allowed {
 		reply(w, http.StatusForbidden, "forbidden")
 		log.Warn("webhook refused", "reason", why)
 		return

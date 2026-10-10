@@ -38,6 +38,24 @@ error. Every key is optional.
 | `control_socket` | `/run/dymploy/control.sock` | Unix socket (mode 0600) used by the CLI |
 | `data_dir` | `/var/lib/dymploy` | repositories, artifacts, history and logs (mode 0750) |
 
+## Configuration files and reload
+
+The configuration is `config.yaml` plus every `config.d/*.yaml` next to it, read in alphabetical order (see
+`examples/config/`). The split is meant for deployment tools: what belongs to the installation stays in
+`config.yaml`; data that is generated elsewhere (for example the policy, produced by another tool) goes in its own
+drop-in file that can be replaced at any time.
+
+- `policy` rules are added up and `webhooks` entries are combined (each name once); every other setting may be
+  given in one file only. Giving it twice is an error naming both files, so what is in force never depends on
+  which file comes last.
+- Unknown keys, anchors and aliases are errors, per file. A file or directory that others can write is refused.
+- Secrets are never read from the drop-ins' contents: `secret_file`, `private_key_file` and the like are paths to
+  files on this machine.
+- `dymploy reload` (or `SIGHUP`) re-reads everything while the daemon runs. Today the **policy** is applied; if any
+  other setting changed the reload is refused as a whole and the daemon says which settings need a restart. A
+  configuration that does not load leaves the previous one in force, and the reason is returned to the caller.
+  Jobs already running are not affected.
+
 ## Webhooks
 
 Each provider that may send events is listed under `webhooks` with the file that holds its webhook

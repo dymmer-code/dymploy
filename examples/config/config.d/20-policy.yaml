@@ -1,0 +1,11 @@
+# Data that can be generated (for example from a dashboard) and replaced at any time with `dymploy reload`.
+policy:
+  - provider: github
+    owner: acme
+    repositories: ["*"]
+    branches: [main]
+    tags: ["v*"]
+  - provider: github
+    owner: globex
+    repositories: [shop, blog, docs]
+    branches: [main]

@@ -22,10 +22,22 @@ type Status struct {
 	StartedAt time.Time `json:"started_at"`
 }
 
+// Handlers are what the daemon offers through the socket. A nil Reload means the daemon cannot
+// reload its configuration.
+type Handlers struct {
+	Status func() Status
+	// Reload re-reads the configuration and applies what can change without a restart. The message
+	// says what happened; an error means nothing was changed.
+	Reload func() (string, error)
+}
+
+// ErrNoReload is returned by Client.Reload when the daemon cannot reload.
+var ErrNoReload = errors.New("this daemon cannot reload its configuration")
+
 // Serve listens on the Unix socket at path until ctx is cancelled. A stale socket file (left by a
 // crash) is replaced; a live one is an error, so two daemons never share state. ready, if not nil,
 // is called once the socket accepts connections.
-func Serve(ctx context.Context, path string, status func() Status, ready func()) error {
+func Serve(ctx context.Context, path string, h Handlers, ready func()) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
 		return fmt.Errorf("creating the control socket directory: %w", err)
 	}
@@ -51,7 +63,22 @@ func Serve(ctx context.Context, path string, status func() Status, ready func())
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/status", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(status())
+		_ = json.NewEncoder(w).Encode(h.Status())
+	})
+	mux.HandleFunc("POST /v1/reload", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if h.Reload == nil {
+			w.WriteHeader(http.StatusNotImplemented)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": ErrNoReload.Error()})
+			return
+		}
+		msg, err := h.Reload()
+		if err != nil {
+			w.WriteHeader(http.StatusUnprocessableEntity)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]string{"message": msg})
 	})
 	srv := &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
 
@@ -91,7 +118,38 @@ func (c *Client) Status(ctx context.Context) (Status, error) {
 	return st, err
 }
 
+// Reload asks the daemon to re-read its configuration. A refused configuration comes back as an
+// error carrying the daemon's explanation; the daemon keeps working with the previous one.
+func (c *Client) Reload(ctx context.Context) (string, error) {
+	var out struct {
+		Message string `json:"message"`
+		Error   string `json:"error"`
+	}
+	code, err := c.do(ctx, http.MethodPost, "/v1/reload", &out)
+	switch {
+	case err != nil:
+		return "", err
+	case code == http.StatusNotImplemented:
+		return "", ErrNoReload
+	case code != http.StatusOK:
+		return "", fmt.Errorf("the daemon did not accept the new configuration and keeps the previous one: %s", out.Error)
+	}
+	return out.Message, nil
+}
+
 func (c *Client) get(ctx context.Context, path string, out any) error {
+	code, err := c.do(ctx, http.MethodGet, path, out)
+	if err != nil {
+		return err
+	}
+	if code != http.StatusOK {
+		return fmt.Errorf("daemon answered %d for %s", code, path)
+	}
+	return nil
+}
+
+// do calls the daemon and decodes the JSON answer, whatever the status; it returns the status.
+func (c *Client) do(ctx context.Context, method, path string, out any) (int, error) {
 	hc := &http.Client{
 		Timeout: 10 * time.Second,
 		Transport: &http.Transport{
@@ -100,17 +158,17 @@ func (c *Client) get(ctx context.Context, path string, out any) error {
 			},
 		},
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://dymploy"+path, nil)
+	req, err := http.NewRequestWithContext(ctx, method, "http://dymploy"+path, nil)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	resp, err := hc.Do(req)
 	if err != nil {
-		return fmt.Errorf("cannot reach the daemon at %s (is it running? start it with `dymploy serve`): %w", c.Socket, err)
+		return 0, fmt.Errorf("cannot reach the daemon at %s (is it running? start it with `dymploy serve`): %w", c.Socket, err)
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("daemon answered %s for %s", resp.Status, path)
+	if err := json.NewDecoder(resp.Body).Decode(out); err != nil && resp.StatusCode == http.StatusOK {
+		return 0, err
 	}
-	return json.NewDecoder(resp.Body).Decode(out)
+	return resp.StatusCode, nil
 }

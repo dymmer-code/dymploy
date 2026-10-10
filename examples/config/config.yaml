@@ -1,0 +1,11 @@
+# /etc/dymploy/config.yaml — what belongs to this installation. The rest lives in config.d/.
+listen: 127.0.0.1:8080
+control_socket: /run/dymploy/control.sock
+data_dir: /var/lib/dymploy
+
+queue:
+  max_concurrent: 2
+  on_busy: coalesce        # two pushes in a row: only the last one is built
+runner:
+  kind: docker
+  params: {depth: 1}

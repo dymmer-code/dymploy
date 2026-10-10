@@ -11,6 +11,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -19,12 +20,14 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
 	bolt "go.etcd.io/bbolt"
 
 	"github.com/dymmer-code/dymploy/internal/checkout"
+	"github.com/dymmer-code/dymploy/internal/config"
 )
 
 func run(t *testing.T, ctx context.Context, args ...string) (stdout, stderr string, err error) {
@@ -766,5 +769,117 @@ func TestCleanArtifactsStopsWithItsContext(t *testing.T) {
 	case <-done:
 	case <-time.After(2 * time.Second):
 		t.Fatal("cleanArtifacts must stop with its context")
+	}
+}
+
+func dropIn(t *testing.T, cfg, name, body string) {
+	t.Helper()
+	dir := filepath.Join(filepath.Dir(cfg), config.DropInDir)
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o640); err != nil {
+		t.Fatal(err)
+	}
+}
+
+const otherRule = "policy:\n  - {provider: github, owner: acme, repositories: [other], branches: [main]}\n"
+
+func TestReloadAppliesANewPolicyWithoutRestarting(t *testing.T) {
+	dir := tmpDir(t)
+	addr := freeAddr(t)
+	cfg := hookConfig(t, dir, addr, "")
+	stop := startWith(t, cfg, filepath.Join(dir, "c.sock"))
+	defer stop()
+	if r := signedPush(t, addr, "r-1", "other", "refs/heads/main", hookSecret); r.StatusCode != 403 {
+		t.Fatalf("before the reload: %d", r.StatusCode)
+	}
+	dropIn(t, cfg, "10-other.yaml", otherRule)
+	out, _, err := run(t, context.Background(), "reload", "--config", cfg)
+	if err != nil || !strings.Contains(out, "2 policy rules") {
+		t.Fatalf("out=%q err=%v", out, err)
+	}
+	if r := signedPush(t, addr, "r-2", "other", "refs/heads/main", hookSecret); r.StatusCode != 202 {
+		t.Fatalf("after the reload: %d", r.StatusCode)
+	}
+	if r := signedPush(t, addr, "r-3", "shop", "refs/heads/main", hookSecret); r.StatusCode != 202 {
+		t.Fatalf("the rules that were there stay: %d", r.StatusCode)
+	}
+}
+
+func TestSIGHUPReloadsToo(t *testing.T) {
+	dir := tmpDir(t)
+	addr := freeAddr(t)
+	cfg := hookConfig(t, dir, addr, "")
+	stop := startWith(t, cfg, filepath.Join(dir, "c.sock"))
+	defer stop()
+	dropIn(t, cfg, "10-other.yaml", otherRule)
+	if err := syscall.Kill(os.Getpid(), syscall.SIGHUP); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for i := 0; ; i++ {
+		if r := signedPush(t, addr, fmt.Sprintf("h-%d", i), "other", "refs/heads/main", hookSecret); r.StatusCode == 202 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("SIGHUP did not apply the new policy")
+		}
+		time.Sleep(30 * time.Millisecond)
+	}
+}
+
+func TestAnInvalidConfigurationLeavesThePreviousOneInForce(t *testing.T) {
+	dir := tmpDir(t)
+	addr := freeAddr(t)
+	cfg := hookConfig(t, dir, addr, "")
+	stop := startWith(t, cfg, filepath.Join(dir, "c.sock"))
+	defer stop()
+	dropIn(t, cfg, "10-bad.yaml", "policy:\n  - {provider: github, owner: x}\n")
+	_, _, err := run(t, context.Background(), "reload", "--config", cfg)
+	if err == nil || !strings.Contains(err.Error(), "keeps the previous one") || !strings.Contains(err.Error(), "repositories is required") {
+		t.Fatalf("%v", err)
+	}
+	if r := signedPush(t, addr, "i-1", "shop", "refs/heads/main", hookSecret); r.StatusCode != 202 {
+		t.Fatalf("the previous policy must still work: %d", r.StatusCode)
+	}
+}
+
+func TestReloadRefusesChangesThatNeedARestart(t *testing.T) {
+	dir := tmpDir(t)
+	addr := freeAddr(t)
+	cfg := hookConfig(t, dir, addr, "")
+	stop := startWith(t, cfg, filepath.Join(dir, "c.sock"))
+	defer stop()
+	dropIn(t, cfg, "10-more.yaml", otherRule+"queue: {max_concurrent: 7, max_pending: 10, on_busy: queue, log_max_bytes: 1000}\nrepo_keep_days: 3\n")
+	_, _, err := run(t, context.Background(), "reload", "--config", cfg)
+	if err == nil || !strings.Contains(err.Error(), "restart") || !strings.Contains(err.Error(), "queue") || !strings.Contains(err.Error(), "repo_keep_days") {
+		t.Fatalf("%v", err)
+	}
+	if r := signedPush(t, addr, "n-1", "other", "refs/heads/main", hookSecret); r.StatusCode != 403 {
+		t.Fatalf("a refused reload applies nothing, not even the policy: %d", r.StatusCode)
+	}
+}
+
+func TestReloadWithoutADaemonSaysSo(t *testing.T) {
+	dir := tmpDir(t)
+	_, _, err := run(t, context.Background(), "reload", "--socket", filepath.Join(dir, "none.sock"))
+	if err == nil || !strings.Contains(err.Error(), "cannot reach the daemon") {
+		t.Fatalf("%v", err)
+	}
+}
+
+func TestReloadWithoutWebhooksHasNothingToApply(t *testing.T) {
+	dir := tmpDir(t)
+	cfg := filepath.Join(dir, "config.yaml")
+	body := "listen: " + freeAddr(t) + "\ncontrol_socket: " + filepath.Join(dir, "c.sock") + "\ndata_dir: " + filepath.Join(dir, "data") + "\n"
+	if err := os.WriteFile(cfg, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stop := startWith(t, cfg, filepath.Join(dir, "c.sock"))
+	defer stop()
+	out, _, err := run(t, context.Background(), "reload", "--config", cfg)
+	if err != nil || !strings.Contains(out, "0 policy rules") {
+		t.Fatalf("out=%q err=%v", out, err)
 	}
 }

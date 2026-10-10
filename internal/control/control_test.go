@@ -2,6 +2,7 @@ package control
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -25,7 +26,7 @@ func start(t *testing.T, path string, st func() Status) (stop func() error) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	ready := make(chan struct{})
-	go func() { done <- Serve(ctx, path, st, func() { close(ready) }) }()
+	go func() { done <- Serve(ctx, path, Handlers{Status: st}, func() { close(ready) }) }()
 	select {
 	case <-ready:
 	case err := <-done:
@@ -93,7 +94,7 @@ func TestSecondServerIsRefused(t *testing.T) {
 	p := sockPath(t)
 	stop := start(t, p, fixed)
 	defer stop()
-	err := Serve(context.Background(), p, fixed, nil)
+	err := Serve(context.Background(), p, Handlers{Status: fixed}, nil)
 	if err == nil || !strings.Contains(err.Error(), "already running") {
 		t.Fatalf("a second server on a live socket must be refused, got %v", err)
 	}
@@ -118,5 +119,57 @@ func TestOnlyStatusIsServed(t *testing.T) {
 	c := &Client{Socket: p}
 	if err := c.get(context.Background(), "/v1/nope", &Status{}); err == nil {
 		t.Fatal("unknown paths must return an error")
+	}
+}
+
+func startWith(t *testing.T, path string, h Handlers) (stop func() error) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	ready := make(chan struct{})
+	go func() { done <- Serve(ctx, path, h, func() { close(ready) }) }()
+	select {
+	case <-ready:
+	case err := <-done:
+		t.Fatalf("server stopped before being ready: %v", err)
+	case <-time.After(3 * time.Second):
+		t.Fatal("server did not become ready")
+	}
+	return func() error { cancel(); return <-done }
+}
+
+func TestReloadReportsWhatTheDaemonSays(t *testing.T) {
+	p := sockPath(t)
+	var fail bool
+	stop := startWith(t, p, Handlers{Status: fixed, Reload: func() (string, error) {
+		if fail {
+			return "", errors.New("policy[0]: provider is required")
+		}
+		return "policy: 2 rules", nil
+	}})
+	defer stop()
+	c := &Client{Socket: p}
+	if msg, err := c.Reload(context.Background()); err != nil || msg != "policy: 2 rules" {
+		t.Fatalf("msg=%q err=%v", msg, err)
+	}
+	fail = true
+	_, err := c.Reload(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "keeps the previous one") || !strings.Contains(err.Error(), "provider is required") {
+		t.Fatalf("a refused configuration must come back with its reason: %v", err)
+	}
+}
+
+func TestReloadWhenTheDaemonCannot(t *testing.T) {
+	p := sockPath(t)
+	stop := start(t, p, fixed)
+	defer stop()
+	if _, err := (&Client{Socket: p}).Reload(context.Background()); !errors.Is(err, ErrNoReload) {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestReloadWithoutADaemon(t *testing.T) {
+	if _, err := (&Client{Socket: sockPath(t)}).Reload(context.Background()); err == nil || !strings.Contains(err.Error(), "cannot reach the daemon") {
+		t.Fatalf("err=%v", err)
 	}
 }
