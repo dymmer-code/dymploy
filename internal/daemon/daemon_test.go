@@ -108,3 +108,23 @@ func TestListenFailureIsReported(t *testing.T) {
 		t.Fatalf("a failed start must leave no control socket behind, stat err = %v", serr)
 	}
 }
+
+func TestExtraHandlersAreServed(t *testing.T) {
+	cfg := testConfig(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	ready := make(chan net.Addr, 1)
+	d := New(cfg, "v").Handle("/hooks/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusTeapot)
+	}))
+	go func() { done <- d.Run(ctx, func(a net.Addr) { ready <- a }) }()
+	addr := <-ready
+	defer func() { cancel(); <-done }()
+	resp, err := http.Post("http://"+addr.String()+"/hooks/anything", "text/plain", nil)
+	if err != nil || resp.StatusCode != http.StatusTeapot {
+		t.Fatalf("%v %v", resp, err)
+	}
+	if r2, err := http.Get("http://" + addr.String() + "/healthz"); err != nil || r2.StatusCode != 200 {
+		t.Fatalf("healthz must keep working: %v %v", r2, err)
+	}
+}

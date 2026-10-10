@@ -21,6 +21,19 @@ type Daemon struct {
 	cfg       *config.Config
 	version   string
 	startedAt time.Time
+	handlers  []route
+}
+
+type route struct {
+	pattern string
+	handler http.Handler
+}
+
+// Handle mounts an extra handler (for example the webhook receiver) on the HTTP listener. Call it
+// before Run.
+func (d *Daemon) Handle(pattern string, h http.Handler) *Daemon {
+	d.handlers = append(d.handlers, route{pattern, h})
+	return d
 }
 
 // New prepares a daemon; nothing starts until Run.
@@ -49,6 +62,9 @@ func (d *Daemon) Run(ctx context.Context, ready func(net.Addr)) error {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 	})
+	for _, r := range d.handlers {
+		mux.Handle(r.pattern, r.handler)
+	}
 	srv := &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
 
 	ctx, cancel := context.WithCancel(ctx)

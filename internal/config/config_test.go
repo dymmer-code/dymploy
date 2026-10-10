@@ -66,3 +66,65 @@ func TestMissingFile(t *testing.T) {
 		t.Fatalf("the error must name the file, got %v", err)
 	}
 }
+
+const withWebhooks = `
+webhooks:
+  github:
+    secret_file: /etc/dymploy/github.secret
+policy:
+  - provider: github
+    owner: acme
+    repositories: ["*"]
+    branches: [main]
+    installations: [4242]
+  - provider: github
+    owner: globex
+    repositories: [dymploy]
+    tags: ["v*"]
+`
+
+func TestWebhooksAndPolicy(t *testing.T) {
+	c, err := Load(write(t, withWebhooks))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Webhooks["github"].SecretFile != "/etc/dymploy/github.secret" {
+		t.Fatalf("%+v", c.Webhooks)
+	}
+	if len(c.Policy) != 2 || c.Policy[0].Installations[0] != 4242 || c.Policy[1].Tags[0] != "v*" {
+		t.Fatalf("%+v", c.Policy)
+	}
+	if c.WebhookMaxBody != 5<<20 || c.WebhookRatePerMinute != 600 {
+		t.Fatalf("limits: %d %d", c.WebhookMaxBody, c.WebhookRatePerMinute)
+	}
+}
+
+func TestLimitsCanBeSet(t *testing.T) {
+	c, err := Load(write(t, "webhook_max_body_bytes: 1024\nwebhook_rate_per_minute: 0\n"))
+	if err != nil || c.WebhookMaxBody != 1024 || c.WebhookRatePerMinute != 0 {
+		t.Fatalf("%+v %v", c, err)
+	}
+}
+
+func TestPolicyValidation(t *testing.T) {
+	hook := "webhooks:\n  github:\n    secret_file: /s\n"
+	cases := map[string]string{
+		"relative secret file":              "webhooks:\n  github:\n    secret_file: s\n",
+		"missing secret file":               "webhooks:\n  github: {}\n",
+		"rule for an unconfigured provider": hook + "policy:\n  - {provider: gitlab, owner: a, repositories: [x], branches: [main]}\n",
+		"rule without provider":             hook + "policy:\n  - {owner: a, repositories: [x], branches: [main]}\n",
+		"rule without owner":                hook + "policy:\n  - {provider: github, repositories: [x], branches: [main]}\n",
+		"rule without repositories":         hook + "policy:\n  - {provider: github, owner: a, branches: [main]}\n",
+		"rule without branches nor tags":    hook + "policy:\n  - {provider: github, owner: a, repositories: [x]}\n",
+		"bad glob":                          hook + "policy:\n  - {provider: github, owner: a, repositories: [\"[\"], branches: [main]}\n",
+		"negative body limit":               "webhook_max_body_bytes: -1\n",
+		"negative rate":                     "webhook_rate_per_minute: -5\n",
+	}
+	for name, body := range cases {
+		t.Run(name, func(t *testing.T) {
+			if _, err := Load(write(t, body)); err == nil {
+				t.Fatalf("must be rejected:\n%s", body)
+			}
+		})
+	}
+}
