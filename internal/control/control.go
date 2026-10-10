@@ -1,0 +1,116 @@
+// Package control is the private channel between the dymploy CLI and the running daemon:
+// a small JSON API over a Unix socket that only its owner can use.
+package control
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net"
+	"net/http"
+	"os"
+	"path/filepath"
+	"syscall"
+	"time"
+)
+
+// Status describes the running daemon.
+type Status struct {
+	Version   string    `json:"version"`
+	PID       int       `json:"pid"`
+	StartedAt time.Time `json:"started_at"`
+}
+
+// Serve listens on the Unix socket at path until ctx is cancelled. A stale socket file (left by a
+// crash) is replaced; a live one is an error, so two daemons never share state. ready, if not nil,
+// is called once the socket accepts connections.
+func Serve(ctx context.Context, path string, status func() Status, ready func()) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+		return fmt.Errorf("creating the control socket directory: %w", err)
+	}
+	if conn, err := net.DialTimeout("unix", path, time.Second); err == nil {
+		conn.Close()
+		return fmt.Errorf("another dymploy is already running on %s", path)
+	}
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("removing the stale control socket: %w", err)
+	}
+	// Restrict permissions at creation time: no window in which another user could connect.
+	old := syscall.Umask(0o177)
+	l, err := net.Listen("unix", path)
+	syscall.Umask(old)
+	if err != nil {
+		return fmt.Errorf("listening on the control socket %s: %w", path, err)
+	}
+	if err := os.Chmod(path, 0o600); err != nil {
+		l.Close()
+		return err
+	}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /v1/status", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(status())
+	})
+	srv := &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
+
+	errc := make(chan error, 1)
+	go func() { errc <- srv.Serve(l) }()
+	if ready != nil {
+		ready()
+	}
+	select {
+	case err := <-errc:
+		os.Remove(path)
+		return err
+	case <-ctx.Done():
+	}
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	err = srv.Shutdown(shutdownCtx)
+	os.Remove(path)
+	if err != nil {
+		return err
+	}
+	if serr := <-errc; serr != nil && !errors.Is(serr, http.ErrServerClosed) {
+		return serr
+	}
+	return nil
+}
+
+// Client talks to a running daemon.
+type Client struct {
+	Socket string
+}
+
+// Status asks the daemon who it is.
+func (c *Client) Status(ctx context.Context) (Status, error) {
+	var st Status
+	err := c.get(ctx, "/v1/status", &st)
+	return st, err
+}
+
+func (c *Client) get(ctx context.Context, path string, out any) error {
+	hc := &http.Client{
+		Timeout: 10 * time.Second,
+		Transport: &http.Transport{
+			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+				return (&net.Dialer{}).DialContext(ctx, "unix", c.Socket)
+			},
+		},
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://dymploy"+path, nil)
+	if err != nil {
+		return err
+	}
+	resp, err := hc.Do(req)
+	if err != nil {
+		return fmt.Errorf("cannot reach the daemon at %s (is it running? start it with `dymploy serve`): %w", c.Socket, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("daemon answered %s for %s", resp.Status, path)
+	}
+	return json.NewDecoder(resp.Body).Decode(out)
+}
