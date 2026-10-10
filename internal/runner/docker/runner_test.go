@@ -12,10 +12,14 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dymmer-code/dymploy/internal/artifact"
+	"github.com/dymmer-code/dymploy/internal/deploy"
+	"github.com/dymmer-code/dymploy/internal/deploy/deploytest"
 	"github.com/dymmer-code/dymploy/internal/provider"
 	"github.com/dymmer-code/dymploy/internal/runner"
 	"github.com/dymmer-code/dymploy/internal/runner/docker"
 	"github.com/dymmer-code/dymploy/internal/runner/docker/dockertest"
+	"github.com/dymmer-code/dymploy/internal/webhook"
 )
 
 const commit = "0123456789abcdef0123456789abcdef01234567"
@@ -392,5 +396,120 @@ func TestASourceErrorIsReturnedAsIs(t *testing.T) {
 	_, err := run.Run(context.Background(), runner.Task{JobID: "j"})
 	if !errors.Is(err, boom) {
 		t.Fatalf("err=%v", err)
+	}
+}
+
+const withDeploy = `version: 1
+build:
+  image: {from: "alpine:3"}
+  steps: [{name: compile, run: "make"}]
+artifact: {name: app, paths: [out/app]}
+deploy:
+  target: production
+  steps:
+    - {name: install, run: "install it"}
+  check: {run: "probe", attempts: 1}
+`
+
+type deployRig struct {
+	*rig
+	remote *deploytest.Fake
+}
+
+func newDeployRig(t *testing.T, manifest string, allow bool) *deployRig {
+	t.Helper()
+	r := newRig(t, manifest)
+	remote := &deploytest.Fake{}
+	ts := deploy.NewTargets()
+	rules := []webhook.Rule{{Provider: "github", Owner: "acme", Repositories: []string{"app"}, Branches: []string{"main"}}}
+	if !allow {
+		rules = []webhook.Rule{{Provider: "github", Owner: "acme", Repositories: []string{"other"}, Branches: []string{"main"}}}
+	}
+	ts.Set(map[string]deploy.Target{"production": {Name: "production", Host: "h", User: "deploy", Allow: webhook.Policy{Rules: rules}}})
+	run, err := docker.New(docker.Config{
+		Engine: r.eng, ArtifactsDir: r.arts, CacheDir: r.cache, User: "505:20", StopGrace: time.Second,
+		Deployer: &deploy.Deployer{Remote: remote, Targets: ts},
+		Source: func(_ context.Context, _ runner.Task) (string, func(), provider.Event, error) {
+			return r.repo, func() { r.released++ }, provider.Event{Provider: "github", Owner: "acme", Repo: "app", Commit: commit, Branch: "main"}, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.run = run
+	r.eng.Script = func(docker.ContainerSpec) dockertest.Behavior {
+		return dockertest.Behavior{Effect: writeOut("out/app")}
+	}
+	return &deployRig{rig: r, remote: remote}
+}
+
+func TestBuildThenDeployAsTheLastStepOfTheJob(t *testing.T) {
+	r := newDeployRig(t, withDeploy, true)
+	res, err := r.do(context.Background())
+	if err != nil || res.ExitCode != 0 {
+		t.Fatalf("res=%+v err=%v\n%s", res, err, r.log())
+	}
+	if got := strings.Join(r.remote.Scripts(), "|"); got != "install it|probe" {
+		t.Fatalf("scripts: %s", got)
+	}
+	dir := filepath.Join(r.arts, "job-1")
+	rec, _, err := artifact.ReadRecord(dir)
+	if err != nil || rec.Job != "job-1" || rec.Commit != commit || rec.Owner != "acme" || rec.Repo != "app" || rec.Name != "app" {
+		t.Fatalf("record %+v %v", rec, err)
+	}
+	var env map[string]string
+	for _, run := range r.remote.Runs {
+		if run.Script == "install it" {
+			env = run.Env
+		}
+	}
+	if env["DYMPLOY_ARTIFACT_SHA256"] != rec.SHA256 || env["DYMPLOY_TARGET"] != "production" {
+		t.Fatalf("env: %v", env)
+	}
+	log := r.log()
+	if strings.Index(log, "artifact ") > strings.Index(log, "deploying to production") || !strings.Contains(log, "deployed to production") {
+		t.Fatalf("the deploy comes after the build in the story:\n%s", log)
+	}
+}
+
+func TestAFailedDeployFailsTheJobWithTheDeployCode(t *testing.T) {
+	r := newDeployRig(t, withDeploy, true)
+	r.remote.Handle = func(string) (int, string, bool) { return 1, "", false }
+	res, err := r.do(context.Background())
+	if err != nil || res.ExitCode != deploy.ExitStep {
+		t.Fatalf("res=%+v err=%v\n%s", res, err, r.log())
+	}
+}
+
+func TestATargetTheRepositoryMayNotUseFailsBeforeBuilding(t *testing.T) {
+	r := newDeployRig(t, withDeploy, false)
+	res, err := r.do(context.Background())
+	if err != nil || res.ExitCode != deploy.ExitTargetDenied || !strings.Contains(r.log(), "not allowed to deploy") || !strings.Contains(r.log(), "nothing was built") {
+		t.Fatalf("res=%+v err=%v\n%s", res, err, r.log())
+	}
+	if len(r.eng.Created) != 0 || len(r.remote.Dialed) != 0 || r.released != 1 {
+		t.Fatalf("nothing may run: containers=%d dialed=%d released=%d", len(r.eng.Created), len(r.remote.Dialed), r.released)
+	}
+	r = newDeployRig(t, strings.Replace(withDeploy, "target: production", "target: nowhere", 1), true)
+	if res, _ := r.do(context.Background()); res.ExitCode != deploy.ExitTargetDenied || !strings.Contains(r.log(), "not configured") {
+		t.Fatalf("%+v\n%s", res, r.log())
+	}
+}
+
+func TestADefinitionThatDeploysNeedsAServerThatCan(t *testing.T) {
+	r := newRig(t, withDeploy) // no Deployer
+	res, err := r.do(context.Background())
+	if err != nil || res.ExitCode != deploy.ExitTargetDenied || !strings.Contains(r.log(), "not set up to deploy") || len(r.eng.Created) != 0 {
+		t.Fatalf("res=%+v err=%v\n%s", res, err, r.log())
+	}
+}
+
+func TestAJobWithoutDeployDoesNotNeedTargets(t *testing.T) {
+	r := newDeployRig(t, basic, true)
+	if res, err := r.do(context.Background()); err != nil || res.ExitCode != 0 || len(r.remote.Dialed) != 0 {
+		t.Fatalf("%+v %v", res, err)
+	}
+	if _, err := os.Stat(filepath.Join(r.arts, "job-1", artifact.RecordFile)); err != nil {
+		t.Fatalf("every artifact gets its record: %v", err)
 	}
 }

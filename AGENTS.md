@@ -18,7 +18,7 @@ module `github.com/dymmer-code/dymploy`). Design notes are in the `docs` directo
 - **Provider independence**: anything specific to GitHub (or any provider) lives behind the `Provider`
   interface; no other package may import provider types.
 - **Container independence**: only `internal/runner/docker` (and `cmd`, which wires it) knows about containers.
-  `internal/architecture` fails the build otherwise. Tests against a real Docker use `-tags integration`.
+  `internal/architecture` fails the build otherwise. SSH is confined the same way (`internal/deploy/sshremote`). Tests against a real Docker or sshd use `-tags integration`.
 - **Strict configuration**: unknown keys are an error.
 
 ## Not in scope here

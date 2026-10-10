@@ -8,7 +8,9 @@ import (
 	"net"
 	"path"
 	"path/filepath"
+	"regexp"
 	"sort"
+	"strings"
 )
 
 // Config is the daemon configuration. Everything that is specific to an installation
@@ -26,6 +28,9 @@ type Config struct {
 	// Policy is the allow-list: which organizations, repositories, branches and tags may start a job.
 	// It lives here, never in a repository. With no rules nothing is built.
 	Policy []PolicyRule `yaml:"policy"`
+	// Targets are the places a build may be deployed to, by name. A repository's dymploy.yaml only names
+	// one; where it is, how to log in and who may use it is decided here.
+	Targets map[string]TargetConfig `yaml:"targets"`
 	// WebhookMaxBody is the largest accepted webhook body, in bytes.
 	WebhookMaxBody int64 `yaml:"webhook_max_body_bytes"`
 	// WebhookRatePerMinute limits webhook requests per minute across all providers; 0 disables it.
@@ -91,6 +96,24 @@ type WebhookConfig struct {
 	// neither). The key file must not be readable by other users.
 	AppID          int64  `yaml:"app_id"`
 	PrivateKeyFile string `yaml:"private_key_file"`
+}
+
+// TargetConfig is a deployment target reached over SSH. The key and the known_hosts file are paths to
+// files on this machine; nothing secret is written in the configuration itself.
+type TargetConfig struct {
+	Host string `yaml:"host"`
+	Port int    `yaml:"port"` // default 22
+	User string `yaml:"user"`
+	// KeyFile is the private key to log in with (not readable by others). KnownHosts holds the host's
+	// public key: the connection is refused if the host does not present it.
+	KeyFile    string `yaml:"key_file"`
+	KnownHosts string `yaml:"known_hosts"`
+	// UploadDir is where the artifact is copied on the target (absolute, or relative to the login
+	// directory). Default: dymploy-uploads.
+	UploadDir string `yaml:"upload_dir"`
+	// Allow says which repositories, branches and tags may deploy here. Required: a target nobody can
+	// use is a mistake, and one everybody can use is a risk. It is the same rule as `policy`.
+	Allow []PolicyRule `yaml:"allow"`
 }
 
 // PolicyRule allows pushes of one provider to repositories of one owner (see webhook.Rule).
@@ -199,6 +222,48 @@ func (c *Config) Validate() error {
 	for i, r := range c.Policy {
 		if err := r.validate(c.Webhooks); err != nil {
 			return fmt.Errorf("policy[%d]: %w", i, err)
+		}
+	}
+	return c.validateTargets()
+}
+
+var (
+	targetNameRE = regexp.MustCompile(`^[a-z][a-z0-9-]{0,62}$`)
+	targetUserRE = regexp.MustCompile(`^[a-z_][a-z0-9_-]{0,31}$`)
+	uploadDirRE  = regexp.MustCompile(`^[A-Za-z0-9._/-]{1,200}$`)
+)
+
+func (c *Config) validateTargets() error {
+	names := make([]string, 0, len(c.Targets))
+	for name := range c.Targets {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		t := c.Targets[name]
+		p := "targets." + name
+		switch {
+		case !targetNameRE.MatchString(name):
+			return fmt.Errorf("%s: the name must be lowercase letters, digits and - (it is what dymploy.yaml writes in deploy.target)", p)
+		case t.Host == "" || strings.ContainsAny(t.Host, " /@\t\n"):
+			return fmt.Errorf("%s.host %q is not a host name or address", p, t.Host)
+		case t.Port < 0 || t.Port > 65535:
+			return fmt.Errorf("%s.port %d is not valid", p, t.Port)
+		case !targetUserRE.MatchString(t.User):
+			return fmt.Errorf("%s.user %q is not a valid user name", p, t.User)
+		case !filepath.IsAbs(t.KeyFile):
+			return fmt.Errorf("%s.key_file %q must be an absolute path", p, t.KeyFile)
+		case !filepath.IsAbs(t.KnownHosts):
+			return fmt.Errorf("%s.known_hosts %q must be an absolute path (host keys are never accepted blindly)", p, t.KnownHosts)
+		case t.UploadDir != "" && (!uploadDirRE.MatchString(t.UploadDir) || strings.Contains(t.UploadDir, "..") || strings.HasPrefix(t.UploadDir, "-")):
+			return fmt.Errorf("%s.upload_dir %q is not a plain path", p, t.UploadDir)
+		case len(t.Allow) == 0:
+			return fmt.Errorf("%s.allow is required: say which repositories may deploy here", p)
+		}
+		for i, r := range t.Allow {
+			if err := r.validate(c.Webhooks); err != nil {
+				return fmt.Errorf("%s.allow[%d]: %w", p, i, err)
+			}
 		}
 	}
 	return nil

@@ -15,6 +15,7 @@ import (
 
 	"github.com/dymmer-code/dymploy/internal/config"
 	"github.com/dymmer-code/dymploy/internal/control"
+	"github.com/dymmer-code/dymploy/internal/deploy"
 	"github.com/dymmer-code/dymploy/internal/webhook"
 )
 
@@ -28,14 +29,13 @@ type reloader struct {
 	cur   *config.Config
 	hooks *webhook.Receiver // nil when no webhooks are configured
 	log   *slog.Logger
+
+	remote  deploy.Remote
+	targets *deploy.Targets
 }
 
 func policyRules(cfg *config.Config) webhook.Policy {
-	rules := make([]webhook.Rule, len(cfg.Policy))
-	for i, r := range cfg.Policy {
-		rules[i] = webhook.Rule(r)
-	}
-	return webhook.Policy{Rules: rules}
+	return webhook.Policy{Rules: rulesOf(cfg.Policy)}
 }
 
 // Reload implements the daemon's reload hook.
@@ -52,11 +52,17 @@ func (r *reloader) Reload() (string, error) {
 		r.log.Error("configuration not reloaded", "error", err)
 		return "", err
 	}
+	// Targets first: they can fail (missing key files), and a failure must change nothing.
+	if err := applyTargets(next, r.remote, r.targets); err != nil {
+		err = fmt.Errorf("the previous targets stay in force: %w", err)
+		r.log.Error("configuration not reloaded", "error", err)
+		return "", err
+	}
 	if r.hooks != nil {
 		r.hooks.SetPolicy(policyRules(next))
 	}
 	r.cur = next
-	msg := fmt.Sprintf("configuration reloaded: %d policy rules", len(next.Policy))
+	msg := fmt.Sprintf("configuration reloaded: %d policy rules, %d targets", len(next.Policy), len(next.Targets))
 	r.log.Info(msg)
 	return msg, nil
 }
@@ -69,7 +75,7 @@ func needRestart(a, b *config.Config) []string {
 	t := va.Type()
 	for i := 0; i < t.NumField(); i++ {
 		key := strings.Split(t.Field(i).Tag.Get("yaml"), ",")[0]
-		if key == "policy" {
+		if key == "policy" || key == "targets" { // applied while running
 			continue
 		}
 		if !reflect.DeepEqual(va.Field(i).Interface(), vb.Field(i).Interface()) {

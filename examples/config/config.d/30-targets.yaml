@@ -1,0 +1,14 @@
+# Where builds may be deployed. dymploy.yaml only names a target (deploy.target: production); everything
+# about it is decided here. The key and known_hosts are files on this machine, never part of this YAML.
+targets:
+  production:
+    host: 10.0.0.20
+    user: deploy-shop            # one user per app keeps apps apart
+    key_file: /etc/dymploy/targets/production-shop.key        # no passphrase, mode 0600
+    known_hosts: /etc/dymploy/targets/production.known_hosts     # the host key must be listed: no trust on first use
+    upload_dir: dymploy-uploads     # relative to the login directory (default)
+    allow:                          # who may deploy here: the same rule as `policy`
+      - provider: github
+        owner: globex
+        repositories: [shop]
+        branches: [main]

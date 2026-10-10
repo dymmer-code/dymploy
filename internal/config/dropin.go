@@ -108,10 +108,10 @@ func noAliases(n *yaml.Node) error {
 }
 
 // Keys whose content is combined across files; every other setting may be given in one file only.
-const (
-	listKey = "policy"   // rules are added up
-	mapKey  = "webhooks" // entries are added up, each name once
-)
+const listKey = "policy" // rules are added up
+
+// mapKeys are the maps whose entries are added up, each name once.
+var mapKeys = map[string]bool{"webhooks": true, "targets": true}
 
 // merge combines the files, in order, into one mapping. Lists are concatenated, maps are merged and a
 // name defined twice is an error; any other setting given twice is an error too, so what is in force
@@ -135,7 +135,7 @@ func merge(srcs []source) (*yaml.Node, error) {
 					pos = index[k.Value]
 				}
 				out.Content[pos].Content = append(out.Content[pos].Content, v.Content...)
-			case k.Value == mapKey && v.Kind == yaml.MappingNode:
+			case mapKeys[k.Value] && v.Kind == yaml.MappingNode:
 				if !seen {
 					index[k.Value] = len(out.Content) + 1
 					out.Content = append(out.Content, k, &yaml.Node{Kind: yaml.MappingNode, Tag: "!!map"})

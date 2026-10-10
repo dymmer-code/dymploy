@@ -248,3 +248,50 @@ func TestCleanToleratesAMissingDirectoryAndReportsOtherFailures(t *testing.T) {
 		}
 	}
 }
+
+func TestRecordRoundTripAndTamperDetection(t *testing.T) {
+	root, dir := t.TempDir(), t.TempDir()
+	write(t, root, "a/f", "hello", 0o644)
+	res, err := Pack(root, Spec{Name: "app", Paths: []string{"a"}}, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := Record{Name: "app", File: "app.tar.gz", SHA256: res.SHA256, Size: res.Size, Entries: res.Files, Provider: "github",
+		Owner: "acme", Repo: "app", Commit: "abc", Job: "j1", CreatedAt: time.Unix(1_700_000_000, 0).UTC()}
+	if err := WriteRecord(dir, rec); err != nil {
+		t.Fatal(err)
+	}
+	if fi, _ := os.Stat(filepath.Join(dir, RecordFile)); fi.Mode().Perm() != 0o600 {
+		t.Fatalf("mode %v", fi.Mode())
+	}
+	got, file, err := ReadRecord(dir)
+	if err != nil || got != rec || file != filepath.Join(dir, "app.tar.gz") {
+		t.Fatalf("%+v %q %v", got, file, err)
+	}
+	os.WriteFile(file, []byte("something else"), 0o600)
+	if _, _, err := ReadRecord(dir); err == nil || !strings.Contains(err.Error(), "does not match") {
+		t.Fatalf("a replaced archive must be refused: %v", err)
+	}
+}
+
+func TestRecordProblems(t *testing.T) {
+	dir := t.TempDir()
+	if _, _, err := ReadRecord(dir); err == nil {
+		t.Fatal("no record")
+	}
+	os.WriteFile(filepath.Join(dir, RecordFile), []byte("{"), 0o600)
+	if _, _, err := ReadRecord(dir); err == nil || !strings.Contains(err.Error(), "damaged") {
+		t.Fatalf("%v", err)
+	}
+	os.WriteFile(filepath.Join(dir, RecordFile), []byte(`{"file":"../x","sha256":"a"}`), 0o600)
+	if _, _, err := ReadRecord(dir); err == nil || !strings.Contains(err.Error(), "incomplete") {
+		t.Fatalf("a record may only name a file next to it: %v", err)
+	}
+	os.WriteFile(filepath.Join(dir, RecordFile), []byte(`{"file":"gone.tar.gz","sha256":"a"}`), 0o600)
+	if _, _, err := ReadRecord(dir); err == nil {
+		t.Fatal("the archive is missing")
+	}
+	if err := WriteRecord(filepath.Join(dir, "nope"), Record{}); err == nil {
+		t.Fatal("cannot write into a missing directory")
+	}
+}

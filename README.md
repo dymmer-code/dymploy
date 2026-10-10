@@ -51,7 +51,7 @@ drop-in file that can be replaced at any time.
 - Unknown keys, anchors and aliases are errors, per file. A file or directory that others can write is refused.
 - Secrets are never read from the drop-ins' contents: `secret_file`, `private_key_file` and the like are paths to
   files on this machine.
-- `dymploy reload` (or `SIGHUP`) re-reads everything while the daemon runs. Today the **policy** is applied; if any
+- `dymploy reload` (or `SIGHUP`) re-reads everything while the daemon runs. The **policy** and the **targets** are applied; if any
   other setting changed the reload is refused as a whole and the daemon says which settings need a restart. A
   configuration that does not load leaves the previous one in force, and the reason is returned to the caller.
   Jobs already running are not affected.
@@ -197,8 +197,34 @@ a reachable engine (checked at every job, so Docker can be started after dymploy
   worked but the artifact could not be packed, 124 time limit, anything else is the failing step's own code. An
   engine that is down, an image that cannot be pulled or a cancelled job are errors of the runner instead.
 
-Nothing outside `internal/runner/docker` knows about containers (`internal/architecture` enforces it). Tests against a
-real engine are tagged: `go test -tags integration ./internal/runner/docker/` (set `DYMPLOY_IT_DIR` under your home when
+## Deploying
+
+If `dymploy.yaml` has a `deploy` section, the job ends with it: the artifact is delivered to the named **target** and the
+steps run there. The target is defined in the daemon's configuration (`targets`, see `examples/config/`), never in the
+repository:
+
+- `host`, `port`, `user`; `key_file` (a private key without passphrase, mode 0600 at most) and `known_hosts` (the host key
+  must be listed: nothing is trusted on first use, and a changed host key is refused).
+- `allow`: the repositories, branches and tags that may deploy there (same rules as `policy`). A definition that asks for
+  a target that does not exist or that it may not use fails **before anything is built** (exit code 4).
+- A target whose files are missing or unusable stops the daemon from starting, and a reload that contains one is refused
+  as a whole.
+
+The job goes build → pack (`artifact.json` is written next to the archive with its SHA-256, commit and job) → deploy:
+the archive is read back through its record, uploaded to `upload_dir` over the SSH connection (no SFTP needed), its
+SHA-256 is **verified on the target before anything runs**, then `deploy.steps` run in order with `sh -ec`, then `check`
+(retried `attempts` times), then `after`. The upload is removed at the end. `DYMPLOY_ARTIFACT` (the remote path),
+`DYMPLOY_ARTIFACT_SHA256`, `DYMPLOY_TARGET`, `DYMPLOY_COMMIT`, `DYMPLOY_SHORT_COMMIT`, `DYMPLOY_OWNER`, `DYMPLOY_REPO`,
+`DYMPLOY_JOB` and `DYMPLOY_BRANCH` or `DYMPLOY_TAG` are available to the steps; secrets and database migrations stay on
+the target.
+
+Exit codes: 4 target missing or denied, 5 a deploy step failed, 6 the health check never passed, 7 an `after` step failed
+(the deployment itself is done), 124 `deploy.timeout` ran out. A target that cannot be reached or a damaged upload is an
+error of the runner instead. **There is no automatic undo**: on failure whatever the steps already did stays as it is and
+the log says so. A `deploy.rollback` section is accepted by the format but not run by this version (re-running the deploy of a previous job is being considered instead).
+
+Nothing outside `internal/runner/docker` knows about containers (`internal/architecture` enforces it, and the same for SSH, which only `cmd` and `internal/deploy/sshremote` know). Tests against a
+real engine are tagged: `go test -tags integration ./internal/runner/docker/` (and `./internal/deploy/sshremote/` against a real OpenSSH, see the file's header) (set `DYMPLOY_IT_DIR` under your home when
 the engine runs in a VM such as Colima).
 
 ## Development

@@ -19,6 +19,8 @@ import (
 	"github.com/dymmer-code/dymploy/internal/checkout"
 	"github.com/dymmer-code/dymploy/internal/config"
 	"github.com/dymmer-code/dymploy/internal/daemon"
+	"github.com/dymmer-code/dymploy/internal/deploy"
+	"github.com/dymmer-code/dymploy/internal/deploy/sshremote"
 	"github.com/dymmer-code/dymploy/internal/intake"
 	"github.com/dymmer-code/dymploy/internal/job"
 	"github.com/dymmer-code/dymploy/internal/provider"
@@ -51,7 +53,12 @@ func newServeCmd(version string) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			mgr, repos, closeState, err := buildQueue(cfg, log, providers)
+			remote, targets := deploy.Remote(&sshremote.Remote{}), deploy.NewTargets()
+			if err := applyTargets(cfg, remote, targets); err != nil {
+				return err
+			}
+			deployer := &deploy.Deployer{Remote: remote, Targets: targets}
+			mgr, repos, closeState, err := buildQueue(cfg, log, providers, deployer)
 			if err != nil {
 				return err
 			}
@@ -71,7 +78,7 @@ func newServeCmd(version string) *cobra.Command {
 			}
 
 			hooks := buildReceiver(cfg, log, providers, intake.New(mgr, cfg.Runner.Kind, cfg.Runner.ParamsJSON()))
-			rl := &reloader{path: configPath, cur: cfg, hooks: hooks, log: log}
+			rl := &reloader{path: configPath, cur: cfg, hooks: hooks, remote: remote, targets: targets, log: log}
 			reloadOnSIGHUP(ctx, rl)
 			d := daemon.New(cfg, version).OnReload(rl.Reload)
 			if hooks != nil {
@@ -98,7 +105,7 @@ func shutdownQueue(mgr *queue.Manager) error {
 // buildQueue is the composition root for execution: it decides which runners exist, where state and
 // logs live, and returns the queue, the working-copy manager (nil when git is not available and no
 // job needs it) and a function that releases the state.
-func buildQueue(cfg *config.Config, log *slog.Logger, providers map[string]provider.Provider) (*queue.Manager, *checkout.Manager, func(), error) {
+func buildQueue(cfg *config.Config, log *slog.Logger, providers map[string]provider.Provider, deployer *deploy.Deployer) (*queue.Manager, *checkout.Manager, func(), error) {
 	runners := runner.NewRegistry()
 	runners.MustRegister(dryrun.Kind, dryrun.New())
 	repos, err := checkout.New(checkout.Config{Root: filepath.Join(cfg.DataDir, "repos")})
@@ -110,7 +117,7 @@ func buildQueue(cfg *config.Config, log *slog.Logger, providers map[string]provi
 		}
 		cl := clone.New(repos, finder)
 		runners.MustRegister(clone.Kind, cl)
-		if err := registerDocker(runners, cl, cfg); err != nil && cfg.Runner.Kind == docker.Kind {
+		if err := registerDocker(runners, cl, cfg, deployer); err != nil && cfg.Runner.Kind == docker.Kind {
 			return nil, nil, nil, fmt.Errorf("runner.kind %q: %w", docker.Kind, err)
 		} else if err != nil {
 			log.Warn("docker is not available: build jobs cannot run", "error", err)
@@ -143,9 +150,42 @@ func buildQueue(cfg *config.Config, log *slog.Logger, providers map[string]provi
 	return mgr, repos, func() { store.Close() }, nil
 }
 
+// applyTargets turns the configured targets into the set the deployer uses. Every one is checked
+// first (its key and known_hosts must exist and be usable); a target that cannot work rejects the
+// whole set, so what is in force is never half of what was asked.
+func applyTargets(cfg *config.Config, remote deploy.Remote, into *deploy.Targets) error {
+	set := make(map[string]deploy.Target, len(cfg.Targets))
+	names := make([]string, 0, len(cfg.Targets))
+	for name := range cfg.Targets {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		tc := cfg.Targets[name]
+		t := deploy.Target{
+			Name: name, Host: tc.Host, Port: tc.Port, User: tc.User, KeyFile: tc.KeyFile, KnownHosts: tc.KnownHosts,
+			UploadDir: tc.UploadDir, Allow: webhook.Policy{Rules: rulesOf(tc.Allow)},
+		}
+		if err := remote.Check(t); err != nil {
+			return fmt.Errorf("targets.%s: %w", name, err)
+		}
+		set[name] = t
+	}
+	into.Set(set)
+	return nil
+}
+
+func rulesOf(in []config.PolicyRule) []webhook.Rule {
+	rules := make([]webhook.Rule, len(in))
+	for i, r := range in {
+		rules[i] = webhook.Rule(r)
+	}
+	return rules
+}
+
 // registerDocker adds the build runner, which needs the docker command and works on top of the clone
 // runner's checkouts. The engine itself is only contacted when a job runs.
-func registerDocker(runners *runner.Registry, cl *clone.Runner, cfg *config.Config) error {
+func registerDocker(runners *runner.Registry, cl *clone.Runner, cfg *config.Config, deployer *deploy.Deployer) error {
 	engine, err := docker.NewCLI("")
 	if err != nil {
 		return err
@@ -158,7 +198,7 @@ func registerDocker(runners *runner.Registry, cl *clone.Runner, cfg *config.Conf
 		return co.Dir, co.Release, ev, nil
 	}
 	run, err := docker.New(docker.Config{
-		Engine: engine, Source: source,
+		Engine: engine, Source: source, Deployer: deployer,
 		ArtifactsDir: filepath.Join(cfg.DataDir, "artifacts"), CacheDir: filepath.Join(cfg.DataDir, "cache"),
 		User: strconv.Itoa(os.Getuid()) + ":" + strconv.Itoa(os.Getgid()),
 	})

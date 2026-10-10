@@ -10,6 +10,7 @@ import (
 	"compress/gzip"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -277,4 +278,80 @@ func Clean(dir string, olderThan time.Duration) (int, error) {
 		removed++
 	}
 	return removed, errors.Join(errs...)
+}
+
+// RecordFile is the name of the record written next to the archive.
+const RecordFile = "artifact.json"
+
+// Record says what an archive is and where it came from. It is the structured counterpart of the log
+// line: whoever deploys the archive, now or later, trusts this and verifies the file against it.
+type Record struct {
+	Name      string    `json:"name"`
+	File      string    `json:"file"` // base name of the archive
+	SHA256    string    `json:"sha256"`
+	Size      int64     `json:"size"`
+	Entries   int       `json:"entries"`
+	Provider  string    `json:"provider"`
+	Owner     string    `json:"owner"`
+	Repo      string    `json:"repo"`
+	Commit    string    `json:"commit"`
+	Ref       string    `json:"ref,omitempty"`
+	Job       string    `json:"job"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+// WriteRecord stores rec as artifact.json in dir (mode 0600), atomically.
+func WriteRecord(dir string, rec Record) error {
+	data, err := json.MarshalIndent(rec, "", "  ")
+	if err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(dir, ".record-*")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(tmp.Name())
+	if _, err := tmp.Write(append(data, '\n')); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Chmod(0o600); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmp.Name(), filepath.Join(dir, RecordFile))
+}
+
+// ReadRecord reads the record in dir and checks that the archive next to it is exactly the one it
+// describes (size and SHA-256), so a swapped or damaged file is never deployed.
+func ReadRecord(dir string) (Record, string, error) {
+	data, err := os.ReadFile(filepath.Join(dir, RecordFile))
+	if err != nil {
+		return Record{}, "", fmt.Errorf("reading the artifact record: %w", err)
+	}
+	var rec Record
+	if err := json.Unmarshal(data, &rec); err != nil {
+		return Record{}, "", fmt.Errorf("the artifact record is damaged: %w", err)
+	}
+	if rec.File == "" || rec.File != filepath.Base(rec.File) || rec.SHA256 == "" {
+		return Record{}, "", errors.New("the artifact record is incomplete")
+	}
+	file := filepath.Join(dir, rec.File)
+	f, err := os.Open(file)
+	if err != nil {
+		return Record{}, "", fmt.Errorf("opening the artifact: %w", err)
+	}
+	defer f.Close()
+	h := sha256.New()
+	n, err := io.Copy(h, f)
+	if err != nil {
+		return Record{}, "", err
+	}
+	if n != rec.Size || hex.EncodeToString(h.Sum(nil)) != rec.SHA256 {
+		return Record{}, "", errors.New("the artifact does not match its record (size or SHA-256 differ): refusing to use it")
+	}
+	return rec, file, nil
 }

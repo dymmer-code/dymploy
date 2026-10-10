@@ -3,6 +3,7 @@ package cmd
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/rsa"
@@ -25,6 +26,9 @@ import (
 	"time"
 
 	bolt "go.etcd.io/bbolt"
+
+	"golang.org/x/crypto/ssh"
+	"golang.org/x/crypto/ssh/knownhosts"
 
 	"github.com/dymmer-code/dymploy/internal/checkout"
 	"github.com/dymmer-code/dymploy/internal/config"
@@ -881,5 +885,62 @@ func TestReloadWithoutWebhooksHasNothingToApply(t *testing.T) {
 	out, _, err := run(t, context.Background(), "reload", "--config", cfg)
 	if err != nil || !strings.Contains(out, "0 policy rules") {
 		t.Fatalf("out=%q err=%v", out, err)
+	}
+}
+
+// targetFiles writes a usable key and known_hosts for a target and returns the YAML of the target.
+func targetFiles(t *testing.T, dir, name string) string {
+	t.Helper()
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	block, err := ssh.MarshalPrivateKey(priv, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := filepath.Join(dir, name+".key")
+	if err := os.WriteFile(key, pem.EncodeToMemory(block), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sp, _ := ssh.NewPublicKey(pub)
+	hosts := filepath.Join(dir, name+".known_hosts")
+	if err := os.WriteFile(hosts, []byte(knownhosts.Line([]string{"10.0.0.7"}, sp)+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return "targets:\n  " + name + ":\n    host: 10.0.0.7\n    user: deploy\n    key_file: " + key + "\n    known_hosts: " + hosts +
+		"\n    allow:\n      - {provider: github, owner: acme, repositories: [shop], branches: [main]}\n"
+}
+
+func TestServeStartsWithTargetsAndRefusesBrokenOnes(t *testing.T) {
+	dir := tmpDir(t)
+	cfg := hookConfig(t, dir, freeAddr(t), targetFiles(t, dir, "production"))
+	stop := startWith(t, cfg, filepath.Join(dir, "c.sock"))
+	stop()
+
+	dir = tmpDir(t)
+	extra := targetFiles(t, dir, "production")
+	os.Remove(filepath.Join(dir, "production.key"))
+	err := serveFails(t, hookConfig(t, dir, freeAddr(t), extra))
+	if err == nil || !strings.Contains(err.Error(), "targets.production") || !strings.Contains(err.Error(), "key_file") {
+		t.Fatalf("a target whose key is missing must stop the start: %v", err)
+	}
+}
+
+func TestReloadAppliesNewTargetsAndRefusesBrokenOnes(t *testing.T) {
+	dir := tmpDir(t)
+	cfg := hookConfig(t, dir, freeAddr(t), "")
+	stop := startWith(t, cfg, filepath.Join(dir, "c.sock"))
+	defer stop()
+	dropIn(t, cfg, "30-production.yaml", targetFiles(t, dir, "production"))
+	out, _, err := run(t, context.Background(), "reload", "--config", cfg)
+	if err != nil || !strings.Contains(out, "1 targets") {
+		t.Fatalf("out=%q err=%v", out, err)
+	}
+	// a target whose key disappears: the reload is refused and says the previous targets stay
+	os.Remove(filepath.Join(dir, "production.key"))
+	_, _, err = run(t, context.Background(), "reload", "--config", cfg)
+	if err == nil || !strings.Contains(err.Error(), "previous targets stay in force") {
+		t.Fatalf("%v", err)
 	}
 }

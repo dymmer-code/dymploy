@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/dymmer-code/dymploy/internal/artifact"
+	"github.com/dymmer-code/dymploy/internal/deploy"
 	"github.com/dymmer-code/dymploy/internal/manifest"
 	"github.com/dymmer-code/dymploy/internal/provider"
 	"github.com/dymmer-code/dymploy/internal/runner"
@@ -48,6 +49,9 @@ type Config struct {
 	// User ("uid:gid") the build containers run as: the daemon's own, so that what they write into
 	// the working copy and the caches can be read and removed by it.
 	User string
+	// Deployer, if set, delivers the artifact to the target a definition names. Without it a definition
+	// that asks to deploy fails before anything is built.
+	Deployer *deploy.Deployer
 	// StopGrace is how long a container gets to stop before being killed; 0 means 10 s.
 	StopGrace time.Duration
 }
@@ -95,11 +99,30 @@ func (r *Runner) Run(ctx context.Context, t runner.Task) (runner.Result, error) 
 	}
 	log.System("manifest: " + m.Summary())
 
+	var target deploy.Target
+	if m.HasDeploy() {
+		// Checked before building: a definition that asks for a target it cannot use must fail at once.
+		if r.cfg.Deployer == nil {
+			log.Stderr().Write([]byte("this server is not set up to deploy\n"))
+			return runner.Result{ExitCode: deploy.ExitTargetDenied}, nil
+		}
+		var err error
+		if target, err = r.cfg.Deployer.Authorize(m.Deploy.Target, ev); err != nil {
+			log.Stderr().Write([]byte(err.Error() + "\n"))
+			log.System("nothing was built")
+			return runner.Result{ExitCode: deploy.ExitTargetDenied}, nil
+		}
+	}
+
 	b := &build{r: r, t: t, m: m, ev: ev, dir: dir, id: safe(t.JobID)}
 	if b.id == "" {
 		return runner.Result{}, errors.New("the task has no usable job id")
 	}
-	return b.run(ctx)
+	res, err := b.run(ctx)
+	if err != nil || res.ExitCode != 0 || !m.HasDeploy() {
+		return res, err
+	}
+	return b.deploy(ctx, target)
 }
 
 // readManifest returns the manifest of the working copy, or a message for the log.
@@ -234,7 +257,28 @@ func (b *build) run(ctx context.Context) (runner.Result, error) {
 		return runner.Result{ExitCode: ExitNoArtifact}, nil
 	}
 	log.System(fmt.Sprintf("artifact %s: %d entries, %d bytes, sha256 %s", res.Path, res.Files, res.Size, res.SHA256))
+	rec := artifact.Record{
+		Name: b.m.Artifact.Name, File: filepath.Base(res.Path), SHA256: res.SHA256, Size: res.Size, Entries: res.Files,
+		Provider: b.ev.Provider, Owner: b.ev.Owner, Repo: b.ev.Repo, Commit: b.ev.Commit, Ref: b.ev.Ref,
+		Job: b.t.JobID, CreatedAt: time.Now().UTC(),
+	}
+	if err := artifact.WriteRecord(filepath.Dir(res.Path), rec); err != nil {
+		return runner.Result{}, fmt.Errorf("writing the artifact record: %w", err)
+	}
 	return runner.Result{}, nil
+}
+
+// deploy delivers the artifact just built. It reads it back through its record, so what is deployed
+// is verified to be exactly what was packed.
+func (b *build) deploy(ctx context.Context, target deploy.Target) (runner.Result, error) {
+	rec, file, err := artifact.ReadRecord(filepath.Join(b.r.cfg.ArtifactsDir, b.id))
+	if err != nil {
+		return runner.Result{}, err
+	}
+	code, err := b.r.cfg.Deployer.Run(ctx, deploy.Request{
+		Target: target, Deploy: b.m.Deploy, Event: b.ev, JobID: b.t.JobID, Record: rec, File: file, Log: b.t.Log,
+	})
+	return runner.Result{ExitCode: code}, err
 }
 
 // buildImage builds build.image.dockerfile and returns the tag of the image, which belongs to this job.

@@ -22,12 +22,15 @@ var rules = map[string][]string{
 	module + "/internal/provider/fake":            {"internal/provider/fake"}, // other packages may use it in tests only
 	module + "/internal/runner/docker":            {"cmd", "internal/runner/docker"},
 	module + "/internal/runner/docker/dockertest": {"internal/runner/docker"}, // other packages may use it in tests only
+	module + "/internal/deploy/sshremote":         {"cmd", "internal/deploy/sshremote"},
+	module + "/internal/deploy/deploytest":        {"internal/deploy"}, // other packages may use it in tests only
 }
 
 // testDoubles may be imported from any _test.go file.
 var testDoubles = map[string]bool{
 	module + "/internal/provider/fake":            true,
 	module + "/internal/runner/docker/dockertest": true,
+	module + "/internal/deploy/deploytest":        true,
 }
 
 // violations lists "file imports package" for every import that breaks a rule.
@@ -107,6 +110,10 @@ func TestTheRuleItselfCatchesViolations(t *testing.T) {
 	write("internal/queue/docker_bad.go", dk)    // a core package must not know Docker
 	write("internal/job/docker_bad_test.go", dk) // not even in tests
 	write("internal/job/double_ok_test.go", dt)  // the double in a test: allowed
+	sr := `package x; import _ "` + module + `/internal/deploy/sshremote"`
+	write("cmd/ssh_ok.go", sr)                     // composition root: allowed
+	write("internal/queue/ssh_bad.go", sr)         // the core must not know SSH
+	write("internal/runner/docker/ssh_bad.go", sr) // not even the runner: it deploys through deploy.Remote
 	got, err := violations(root)
 	if err != nil {
 		t.Fatal(err)
@@ -116,6 +123,8 @@ func TestTheRuleItselfCatchesViolations(t *testing.T) {
 		"internal/queue/bad.go imports " + module + "/internal/provider/github",
 		"internal/queue/bad2.go imports " + module + "/internal/provider/fake",
 		"internal/queue/docker_bad.go imports " + module + "/internal/runner/docker",
+		"internal/queue/ssh_bad.go imports " + module + "/internal/deploy/sshremote",
+		"internal/runner/docker/ssh_bad.go imports " + module + "/internal/deploy/sshremote",
 	}
 	if strings.Join(got, "|") != strings.Join(want, "|") {
 		t.Fatalf("got %v\nwant %v", got, want)

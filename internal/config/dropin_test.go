@@ -222,7 +222,57 @@ func TestTheExampleConfigurationLoads(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(c.Policy) != 2 || c.Webhooks["github"].AppID != 123456 || c.Runner.Kind != "docker" || c.Queue.OnBusy != "coalesce" {
+	if len(c.Policy) != 2 || c.Webhooks["github"].AppID != 123456 || c.Runner.Kind != "docker" || c.Queue.OnBusy != "coalesce" || c.Targets["production"].User != "deploy-shop" {
 		t.Fatalf("%+v", c)
+	}
+}
+
+func target(extra string) string {
+	return "targets:\n  production:\n    host: 10.0.0.20\n    user: deploy\n    key_file: /etc/dymploy/production.key\n    known_hosts: /etc/dymploy/production.known_hosts\n" + extra +
+		"    allow:\n      - {provider: github, owner: globex, repositories: [shop], branches: [main]}\n"
+}
+
+func TestTargetsAreCombinedAcrossFilesAndValidated(t *testing.T) {
+	p := layout(t, map[string]string{
+		"config.d/10-hooks.yaml": hooks,
+		"config.d/30-production.yaml": target("    upload_dir: uploads\n    port: 2222\n"),
+		"config.d/31-other.yaml": strings.Replace(target(""), "production:", "static-sites:", 1),
+	})
+	c, err := Load(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := c.Targets["production"]
+	if len(c.Targets) != 2 || r.Host != "10.0.0.20" || r.Port != 2222 || r.UploadDir != "uploads" || len(r.Allow) != 1 {
+		t.Fatalf("%+v", c.Targets)
+	}
+	dup := layout(t, map[string]string{"config.d/10-hooks.yaml": hooks, "config.d/30.yaml": target(""), "config.d/31.yaml": target("")})
+	if _, err := Load(dup); err == nil || !strings.Contains(err.Error(), "targets.production is defined in both") {
+		t.Fatalf("%v", err)
+	}
+}
+
+func TestTargetValidation(t *testing.T) {
+	good := target("")
+	for name, tc := range map[string]struct{ body, want string }{
+		"bad name":          {strings.Replace(good, "production:", "Production_1:", 1), "the name must be"},
+		"no host":           {strings.Replace(good, "host: 10.0.0.20", "host: \"\"", 1), "host"},
+		"host with a user":  {strings.Replace(good, "10.0.0.20", "root@production", 1), "host"},
+		"bad port":          {target("    port: 70000\n"), "port"},
+		"bad user":          {strings.Replace(good, "user: deploy", "user: \"-oProxyCommand=x\"", 1), "user"},
+		"relative key":      {strings.Replace(good, "/etc/dymploy/production.key", "production.key", 1), "key_file"},
+		"no known_hosts":    {strings.Replace(good, "known_hosts: /etc/dymploy/production.known_hosts", "known_hosts: production", 1), "known_hosts"},
+		"upload dir climbs": {target("    upload_dir: ../x\n"), "upload_dir"},
+		"upload dir option": {target("    upload_dir: -rf\n"), "upload_dir"},
+		"nobody may use it": {strings.Split(good, "    allow:")[0], "allow is required"},
+		"a bad allow rule":  {strings.Replace(good, "repositories: [shop], ", "", 1), "allow[0]"},
+		"unknown provider":  {strings.Replace(good, "provider: github", "provider: gitlab", 1), "no entry under webhooks"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := Load(layout(t, map[string]string{"config.d/10-hooks.yaml": hooks, "config.d/30.yaml": tc.body}))
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("want %q, got %v", tc.want, err)
+			}
+		})
 	}
 }
