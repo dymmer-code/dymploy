@@ -1,0 +1,6 @@
+# A read-only view of the jobs for other tools (for example a dashboard) on the public listener, under
+# /api/v1/. Without token_file nothing is mounted. Publish it only behind the reverse proxy, over TLS.
+api:
+  token_file: /etc/dymploy/api.token     # the bearer token clients send, mode 0600
+  allowed_origins: ["example.com"]        # only for browsers opening the live channel; other clients need nothing
+  max_streams: 16                        # live channels open at once

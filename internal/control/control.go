@@ -29,6 +29,8 @@ type Handlers struct {
 	// Reload re-reads the configuration and applies what can change without a restart. The message
 	// says what happened; an error means nothing was changed.
 	Reload func() (string, error)
+	// Jobs, if set, adds the job endpoints and the live channel (see API).
+	Jobs Jobs
 }
 
 // ErrNoReload is returned by Client.Reload when the daemon cannot reload.
@@ -80,6 +82,12 @@ func Serve(ctx context.Context, path string, h Handlers, ready func()) error {
 		}
 		_ = json.NewEncoder(w).Encode(map[string]string{"message": msg})
 	})
+	if h.Jobs != nil {
+		api := (&API{Jobs: h.Jobs, MaxStreams: 64}).Handler()
+		for _, p := range []string{"/v1/jobs", "/v1/jobs/", "/v1/events"} {
+			mux.Handle(p, api)
+		}
+	}
 	srv := &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
 
 	errc := make(chan error, 1)

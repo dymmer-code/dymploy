@@ -222,7 +222,7 @@ func TestTheExampleConfigurationLoads(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(c.Policy) != 2 || c.Webhooks["github"].AppID != 123456 || c.Runner.Kind != "docker" || c.Queue.OnBusy != "coalesce" || c.Targets["production"].User != "deploy-shop" {
+	if len(c.Policy) != 2 || c.Webhooks["github"].AppID != 123456 || c.Runner.Kind != "docker" || c.Queue.OnBusy != "coalesce" || c.Targets["production"].User != "deploy-shop" || c.API.TokenFile == "" {
 		t.Fatalf("%+v", c)
 	}
 }
@@ -272,6 +272,31 @@ func TestTargetValidation(t *testing.T) {
 			_, err := Load(layout(t, map[string]string{"config.d/10-hooks.yaml": hooks, "config.d/30.yaml": tc.body}))
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("want %q, got %v", tc.want, err)
+			}
+		})
+	}
+}
+
+func TestAPIConfiguration(t *testing.T) {
+	good := "api:\n  token_file: /etc/dymploy/api.token\n  allowed_origins: [\"example.com\", \"*.example.com\"]\n  max_streams: 8\n"
+	c, err := Load(layout(t, map[string]string{"config.yaml": good}))
+	if err != nil || c.API.TokenFile != "/etc/dymploy/api.token" || len(c.API.AllowedOrigins) != 2 || c.API.MaxStreams != 8 {
+		t.Fatalf("%v %+v", err, c.API)
+	}
+	if c, err := Load(layout(t, map[string]string{})); err != nil || c.API.TokenFile != "" {
+		t.Fatalf("closed by default: %v %+v", err, c.API)
+	}
+	for name, body := range map[string]string{
+		"relative token":              "api:\n  token_file: api.token\n",
+		"origins without a token":     "api:\n  allowed_origins: [example.com]\n",
+		"max streams without a token": "api:\n  max_streams: 3\n",
+		"negative max streams":        "api:\n  token_file: /t\n  max_streams: -1\n",
+		"bad origin pattern":          "api:\n  token_file: /t\n  allowed_origins: [\"[\"]\n",
+		"empty origin":                "api:\n  token_file: /t\n  allowed_origins: [\"\"]\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := Load(layout(t, map[string]string{"config.yaml": body})); err == nil || !strings.Contains(err.Error(), "api.") {
+				t.Fatalf("%v", err)
 			}
 		})
 	}

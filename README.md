@@ -223,6 +223,31 @@ Nothing outside `internal/runner/docker` knows about containers (`internal/archi
 real engine are tagged: `go test -tags integration ./internal/runner/docker/` (and `./internal/deploy/sshremote/` against a real OpenSSH, see the file's header) (set `DYMPLOY_IT_DIR` under your home when
 the engine runs in a VM such as Colima).
 
+## Looking at the jobs
+
+The same binary talks to the running daemon through the control socket (`--socket`, or the one in the configuration):
+
+```sh
+dymploy jobs [--state running,queued] [--name github/owner/repo] [--limit 20] [--json]
+dymploy job <id>                 # state, exit code, error, timings
+dymploy logs <id> [-f]           # -f follows until the job ends (lines: "#" dymploy, "!" stderr)
+dymploy cancel <id>              # a waiting job never runs; a running one is stopped
+dymploy retry <id>               # a finished job again, as a new job
+dymploy watch [--json]           # everything, live: what is waiting or running, then every change and log line
+```
+
+The API behind those commands is `GET /v1/jobs`, `/v1/jobs/{id}`, `/v1/jobs/{id}/logs?after=&limit=`, `POST /v1/jobs/{id}/cancel`
+and `/retry`, and the live channel `GET /v1/events` (a WebSocket). The channel starts with a `snapshot` of the jobs waiting or
+running and then sends `queued`, `started`, `output` and `finished` messages as JSON. With `?job=<id>&after=<seq>` it first
+replays that job's log from the sequence number and follows the job until it finishes, so a client that reconnects loses
+nothing: every log line carries its `seq`, and a gap means the client was too slow and can read the log again. The
+parameters and input of a job (which can mention repository details) are never part of the API.
+
+Other tools can use the **read-only** part on the public listener, under `/api/v1/`, when `api.token_file` is set
+(`Authorization: Bearer <token>`; see `examples/config/`). Without the token file nothing is mounted. Cancelling and retrying
+stay on the control socket. Run it behind the reverse proxy over TLS; `api.allowed_origins` lists the web origins allowed to
+open the channel from a browser.
+
 ## Development
 
 ```sh

@@ -60,10 +60,11 @@ type Deps struct {
 
 // Errors returned by the Manager.
 var (
-	ErrQueueFull = errors.New("the queue is full")
-	ErrRejected  = errors.New("a job with this name is already waiting or running")
-	ErrFinished  = errors.New("the job has already finished")
-	ErrClosed    = errors.New("the queue is not accepting jobs")
+	ErrQueueFull   = errors.New("the queue is full")
+	ErrRejected    = errors.New("a job with this name is already waiting or running")
+	ErrFinished    = errors.New("the job has already finished")
+	ErrNotFinished = errors.New("only a finished job can be retried")
+	ErrClosed      = errors.New("the queue is not accepting jobs")
 
 	errCanceledByUser = errors.New("canceled by user")
 	errShutdown       = errors.New("daemon stopped")
@@ -285,7 +286,7 @@ func (m *Manager) Retry(ctx context.Context, id job.ID) (job.Job, error) {
 		return job.Job{}, err
 	}
 	if !j.State.Final() {
-		return job.Job{}, fmt.Errorf("job %s is %s: only a finished job can be retried", id, j.State)
+		return job.Job{}, fmt.Errorf("%w: job %s is %s", ErrNotFinished, id, j.State)
 	}
 	return m.Submit(ctx, Request{Name: j.Name, Kind: j.Kind, Params: j.Params, Input: j.Input, RetryOf: j.ID})
 }

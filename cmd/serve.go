@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -18,6 +19,7 @@ import (
 	"github.com/dymmer-code/dymploy/internal/artifact"
 	"github.com/dymmer-code/dymploy/internal/checkout"
 	"github.com/dymmer-code/dymploy/internal/config"
+	"github.com/dymmer-code/dymploy/internal/control"
 	"github.com/dymmer-code/dymploy/internal/daemon"
 	"github.com/dymmer-code/dymploy/internal/deploy"
 	"github.com/dymmer-code/dymploy/internal/deploy/sshremote"
@@ -80,7 +82,10 @@ func newServeCmd(version string) *cobra.Command {
 			hooks := buildReceiver(cfg, log, providers, intake.New(mgr, cfg.Runner.Kind, cfg.Runner.ParamsJSON()))
 			rl := &reloader{path: configPath, cur: cfg, hooks: hooks, remote: remote, targets: targets, log: log}
 			reloadOnSIGHUP(ctx, rl)
-			d := daemon.New(cfg, version).OnReload(rl.Reload)
+			d := daemon.New(cfg, version).OnReload(rl.Reload).WithJobs(queueJobs{mgr})
+			if err := mountAPI(d, cfg, queueJobs{mgr}); err != nil {
+				return err
+			}
 			if hooks != nil {
 				d.Handle("/hooks/", hooks.Handler())
 			}
@@ -148,6 +153,21 @@ func buildQueue(cfg *config.Config, log *slog.Logger, providers map[string]provi
 		return nil, nil, nil, err
 	}
 	return mgr, repos, func() { store.Close() }, nil
+}
+
+// mountAPI opens the read-only API on the public listener when a token is configured. Without one
+// nothing is mounted: the jobs are then reachable only through the control socket.
+func mountAPI(d *daemon.Daemon, cfg *config.Config, jobs control.Jobs) error {
+	if cfg.API.TokenFile == "" {
+		return nil
+	}
+	token, err := secret.ReadFile(cfg.API.TokenFile)
+	if err != nil {
+		return fmt.Errorf("api.token_file: %w", err)
+	}
+	api := &control.API{Jobs: jobs, ReadOnly: true, OriginPatterns: cfg.API.AllowedOrigins, MaxStreams: cfg.API.MaxStreams}
+	d.Handle("/api/", http.StripPrefix("/api", control.RequireToken(token, api.Handler())))
+	return nil
 }
 
 // applyTargets turns the configured targets into the set the deployer uses. Every one is checked

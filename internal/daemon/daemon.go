@@ -23,6 +23,7 @@ type Daemon struct {
 	startedAt time.Time
 	handlers  []route
 	reload    func() (string, error)
+	jobs      control.Jobs
 }
 
 type route struct {
@@ -34,6 +35,12 @@ type route struct {
 // before Run.
 func (d *Daemon) Handle(pattern string, h http.Handler) *Daemon {
 	d.handlers = append(d.handlers, route{pattern, h})
+	return d
+}
+
+// WithJobs makes the jobs available on the control socket. Call it before Run.
+func (d *Daemon) WithJobs(j control.Jobs) *Daemon {
+	d.jobs = j
 	return d
 }
 
@@ -82,7 +89,7 @@ func (d *Daemon) Run(ctx context.Context, ready func(net.Addr)) error {
 	ctlReady := make(chan struct{})
 	ctlErr := make(chan error, 1)
 	go func() {
-		ctlErr <- control.Serve(ctx, d.cfg.ControlSocket, control.Handlers{Status: d.status, Reload: d.reload}, func() { close(ctlReady) })
+		ctlErr <- control.Serve(ctx, d.cfg.ControlSocket, control.Handlers{Status: d.status, Reload: d.reload, Jobs: d.jobs}, func() { close(ctlReady) })
 	}()
 
 	select {

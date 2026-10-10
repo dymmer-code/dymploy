@@ -12,6 +12,7 @@ import (
 
 	"github.com/dymmer-code/dymploy/internal/config"
 	"github.com/dymmer-code/dymploy/internal/control"
+	"github.com/dymmer-code/dymploy/internal/job"
 )
 
 func testConfig(t *testing.T) *config.Config {
@@ -126,5 +127,45 @@ func TestExtraHandlersAreServed(t *testing.T) {
 	}
 	if r2, err := http.Get("http://" + addr.String() + "/healthz"); err != nil || r2.StatusCode != 200 {
 		t.Fatalf("healthz must keep working: %v %v", r2, err)
+	}
+}
+
+type noJobs struct{}
+
+func (noJobs) List(context.Context, job.Filter) ([]job.Job, error) {
+	return []job.Job{{ID: "x", Name: "n", State: job.Succeeded}}, nil
+}
+func (noJobs) Get(context.Context, job.ID) (job.Job, error)   { return job.Job{}, job.ErrNotFound }
+func (noJobs) Logs(job.ID, int64, int) ([]job.Entry, error)   { return nil, nil }
+func (noJobs) Cancel(context.Context, job.ID) error           { return nil }
+func (noJobs) Retry(context.Context, job.ID) (job.Job, error) { return job.Job{}, nil }
+func (noJobs) Subscribe() (<-chan control.Event, func())      { return make(chan control.Event), func() {} }
+
+func TestJobsAndReloadAreOfferedOnTheControlSocket(t *testing.T) {
+	cfg := testConfig(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	ready := make(chan net.Addr, 1)
+	reloaded := 0
+	go func() {
+		done <- New(cfg, "v").WithJobs(noJobs{}).OnReload(func() (string, error) { reloaded++; return "ok", nil }).Run(ctx, func(a net.Addr) { ready <- a })
+	}()
+	select {
+	case <-ready:
+	case err := <-done:
+		t.Fatalf("daemon stopped early: %v", err)
+	case <-time.After(3 * time.Second):
+		t.Fatal("daemon did not become ready")
+	}
+	c := &control.Client{Socket: cfg.ControlSocket}
+	if jobs, err := c.Jobs(context.Background(), job.Filter{}); err != nil || len(jobs) != 1 {
+		t.Fatalf("%v %v", jobs, err)
+	}
+	if msg, err := c.Reload(context.Background()); err != nil || msg != "ok" || reloaded != 1 {
+		t.Fatalf("%q %v %d", msg, err, reloaded)
+	}
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatal(err)
 	}
 }

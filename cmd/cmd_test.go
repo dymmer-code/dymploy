@@ -12,6 +12,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -21,6 +22,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -32,6 +34,9 @@ import (
 
 	"github.com/dymmer-code/dymploy/internal/checkout"
 	"github.com/dymmer-code/dymploy/internal/config"
+	"github.com/dymmer-code/dymploy/internal/control"
+	"github.com/dymmer-code/dymploy/internal/job"
+	"github.com/dymmer-code/dymploy/internal/queue"
 )
 
 func run(t *testing.T, ctx context.Context, args ...string) (stdout, stderr string, err error) {
@@ -942,5 +947,318 @@ func TestReloadAppliesNewTargetsAndRefusesBrokenOnes(t *testing.T) {
 	_, _, err = run(t, context.Background(), "reload", "--config", cfg)
 	if err == nil || !strings.Contains(err.Error(), "previous targets stay in force") {
 		t.Fatalf("%v", err)
+	}
+}
+
+// finishedJob starts a daemon, runs one job through it and returns the config path and the job's id.
+func finishedJob(t *testing.T, extra string) (cfg, addr, id string, stop func()) {
+	t.Helper()
+	dir := tmpDir(t)
+	addr = freeAddr(t)
+	cfg = hookConfig(t, dir, addr, extra)
+	stop = startWith(t, cfg, filepath.Join(dir, "c.sock"))
+	if r := signedPush(t, addr, "j-1", "shop", "refs/heads/main", hookSecret); r.StatusCode != 202 {
+		t.Fatalf("got %d", r.StatusCode)
+	}
+	waitForLog(t, filepath.Join(dir, "data"), "job finished: succeeded")
+	out, _, err := run(t, context.Background(), "jobs", "--config", cfg, "--json")
+	var jobs []map[string]any
+	if err != nil || json.Unmarshal([]byte(out), &jobs) != nil || len(jobs) != 1 {
+		t.Fatalf("jobs: %v %q", err, out)
+	}
+	return cfg, addr, jobs[0]["id"].(string), stop
+}
+
+func TestJobsCommandsShowWhatHappened(t *testing.T) {
+	cfg, _, id, stop := finishedJob(t, "")
+	defer stop()
+	ctx := context.Background()
+
+	out, _, err := run(t, ctx, "jobs", "--config", cfg)
+	if err != nil || !strings.Contains(out, id) || !strings.Contains(out, "succeeded") || !strings.Contains(out, "github/acme/shop") {
+		t.Fatalf("jobs: %v %q", err, out)
+	}
+	if out, _, _ := run(t, ctx, "jobs", "--config", cfg, "--state", "running"); !strings.Contains(out, "no jobs") {
+		t.Fatalf("filter: %q", out)
+	}
+	if _, _, err := run(t, ctx, "jobs", "--config", cfg, "--state", "bogus"); err == nil || !strings.Contains(err.Error(), "unknown state") {
+		t.Fatalf("a bad state is explained: %v", err)
+	}
+
+	out, _, err = run(t, ctx, "job", id, "--config", cfg)
+	if err != nil || !strings.Contains(out, "state    succeeded") || !strings.Contains(out, "exit     0") || !strings.Contains(out, "finished") {
+		t.Fatalf("job: %v %q", err, out)
+	}
+	if out, _, _ := run(t, ctx, "job", id, "--config", cfg, "--json"); !strings.Contains(out, `"state": "succeeded"`) || strings.Contains(out, `"input"`) {
+		t.Fatalf("json (without the opaque input): %q", out)
+	}
+	if _, _, err := run(t, ctx, "job", "nope", "--config", cfg); err == nil || !strings.Contains(err.Error(), "not found") {
+		t.Fatalf("%v", err)
+	}
+
+	out, _, err = run(t, ctx, "logs", id, "--config", cfg)
+	if err != nil || !strings.Contains(out, "# job started") || !strings.Contains(out, "nothing was executed") || !strings.Contains(out, "job finished: succeeded") {
+		t.Fatalf("logs: %v %q", err, out)
+	}
+	if out, _, _ := run(t, ctx, "logs", id, "--config", cfg, "--after", "1"); strings.Contains(out, "job started") {
+		t.Fatalf("--after skips lines already seen: %q", out)
+	}
+	// following a job that is already over shows everything and returns by itself
+	fctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	out, _, err = run(t, fctx, "logs", id, "-f", "--config", cfg)
+	if err != nil || !strings.Contains(out, "job finished: succeeded") {
+		t.Fatalf("logs -f: %v %q", err, out)
+	}
+
+	if _, _, err := run(t, ctx, "cancel", id, "--config", cfg); err == nil || !strings.Contains(err.Error(), "already finished") {
+		t.Fatalf("a finished job cannot be cancelled: %v", err)
+	}
+	out, _, err = run(t, ctx, "retry", id, "--config", cfg)
+	if err != nil || !strings.Contains(out, "retry of "+id) {
+		t.Fatalf("retry: %v %q", err, out)
+	}
+	waitFor(t, func() bool {
+		o, _, _ := run(t, ctx, "jobs", "--config", cfg, "--json")
+		return strings.Count(o, `"retry_of"`) == 1 && strings.Count(o, `"state": "succeeded"`) == 2
+	})
+	if _, _, err := run(t, ctx, "retry", "nope", "--config", cfg); err == nil {
+		t.Fatal("unknown job")
+	}
+}
+
+func waitFor(t *testing.T, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for !cond() {
+		if time.Now().After(deadline) {
+			t.Fatal("condition not reached")
+		}
+		time.Sleep(30 * time.Millisecond)
+	}
+}
+
+func TestWatchShowsJobsAsTheyHappen(t *testing.T) {
+	dir := tmpDir(t)
+	addr := freeAddr(t)
+	cfg := hookConfig(t, dir, addr, "")
+	stop := startWith(t, cfg, filepath.Join(dir, "c.sock"))
+	defer stop()
+	ctx, cancel := context.WithCancel(context.Background())
+	var out syncBuffer
+	done := make(chan error, 1)
+	go func() {
+		root := NewRootCmd("v")
+		root.SetOut(&out)
+		root.SetErr(io.Discard)
+		root.SetArgs([]string{"watch", "--config", cfg})
+		done <- root.ExecuteContext(ctx)
+	}()
+	waitFor(t, func() bool { return strings.Contains(out.String(), "nothing waiting or running") })
+	if r := signedPush(t, addr, "w-1", "shop", "refs/heads/main", hookSecret); r.StatusCode != 202 {
+		t.Fatalf("got %d", r.StatusCode)
+	}
+	waitFor(t, func() bool {
+		s := out.String()
+		return strings.Contains(s, "queued") && strings.Contains(s, "started") && strings.Contains(s, "finished") && strings.Contains(s, "nothing was executed")
+	})
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatalf("Ctrl-C is the normal way to stop watching: %v", err)
+	}
+
+	// and as JSON, one message per line
+	ctx2, cancel2 := context.WithCancel(context.Background())
+	var js syncBuffer
+	done2 := make(chan error, 1)
+	go func() {
+		root := NewRootCmd("v")
+		root.SetOut(&js)
+		root.SetErr(io.Discard)
+		root.SetArgs([]string{"watch", "--config", cfg, "--json"})
+		done2 <- root.ExecuteContext(ctx2)
+	}()
+	waitFor(t, func() bool { return strings.Contains(js.String(), `"type":"snapshot"`) })
+	cancel2()
+	<-done2
+}
+
+type syncBuffer struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (s *syncBuffer) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.Write(p)
+}
+func (s *syncBuffer) String() string { s.mu.Lock(); defer s.mu.Unlock(); return s.b.String() }
+
+func TestJobCommandsWithoutADaemon(t *testing.T) {
+	sock := filepath.Join(tmpDir(t), "none.sock")
+	for _, args := range [][]string{{"jobs"}, {"job", "x"}, {"logs", "x"}, {"logs", "x", "-f"}, {"cancel", "x"}, {"retry", "x"}, {"watch"}} {
+		_, _, err := run(t, context.Background(), append(args, "--socket", sock)...)
+		if err == nil || !strings.Contains(err.Error(), "cannot reach the daemon") {
+			t.Errorf("%v: %v", args, err)
+		}
+	}
+}
+
+func TestJobCommandsWithABrokenConfiguration(t *testing.T) {
+	p := filepath.Join(tmpDir(t), "broken.yaml")
+	os.WriteFile(p, []byte("listen: nope\n"), 0o600)
+	for _, args := range [][]string{{"jobs"}, {"job", "x"}, {"logs", "x"}, {"cancel", "x"}, {"retry", "x"}, {"watch"}} {
+		if _, _, err := run(t, context.Background(), append(args, "--config", p)...); err == nil || !strings.Contains(err.Error(), "broken.yaml") {
+			t.Errorf("%v: %v", args, err)
+		}
+	}
+}
+
+func TestThePublicAPIIsClosedWithoutATokenAndReadOnlyWithOne(t *testing.T) {
+	// closed
+	cfg, addr, id, stop := finishedJob(t, "")
+	_ = cfg
+	resp, err := http.Get("http://" + addr + "/api/v1/jobs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != 404 {
+		t.Fatalf("without api.token_file nothing is mounted: %d", resp.StatusCode)
+	}
+	stop()
+
+	// open, with a token
+	dir := tmpDir(t)
+	tokenFile := filepath.Join(dir, "api.token")
+	os.WriteFile(tokenFile, []byte("a-long-random-token\n"), 0o600)
+	addr = freeAddr(t)
+	cfg = hookConfig(t, dir, addr, "api:\n  token_file: "+tokenFile+"\n")
+	stop = startWith(t, cfg, filepath.Join(dir, "c.sock"))
+	defer stop()
+	if r := signedPush(t, addr, "p-1", "shop", "refs/heads/main", hookSecret); r.StatusCode != 202 {
+		t.Fatalf("got %d", r.StatusCode)
+	}
+	waitForLog(t, filepath.Join(dir, "data"), "job finished: succeeded")
+	get := func(path, token string) *http.Response {
+		req, _ := http.NewRequest(http.MethodGet, "http://"+addr+path, nil)
+		if token != "" {
+			req.Header.Set("Authorization", "Bearer "+token)
+		}
+		r, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return r
+	}
+	if r := get("/api/v1/jobs", ""); r.StatusCode != 401 {
+		t.Fatalf("no token: %d", r.StatusCode)
+	}
+	if r := get("/api/v1/jobs", "wrong"); r.StatusCode != 401 {
+		t.Fatalf("wrong token: %d", r.StatusCode)
+	}
+	r := get("/api/v1/jobs", "a-long-random-token")
+	body, _ := io.ReadAll(r.Body)
+	r.Body.Close()
+	if r.StatusCode != 200 || !strings.Contains(string(body), "github/acme/shop") || strings.Contains(string(body), `"input"`) {
+		t.Fatalf("%d %s", r.StatusCode, body)
+	}
+	_ = id
+	req, _ := http.NewRequest(http.MethodPost, "http://"+addr+"/api/v1/jobs/x/cancel", nil)
+	req.Header.Set("Authorization", "Bearer a-long-random-token")
+	if resp, _ := http.DefaultClient.Do(req); resp.StatusCode == 200 {
+		t.Fatal("the public API is read-only")
+	}
+}
+
+func TestServeRefusesAnUnusableAPIToken(t *testing.T) {
+	dir := tmpDir(t)
+	open := filepath.Join(dir, "token")
+	os.WriteFile(open, []byte("t"), 0o644)
+	if err := serveFails(t, hookConfig(t, dir, freeAddr(t), "api:\n  token_file: "+open+"\n")); !strings.Contains(err.Error(), "api.token_file") {
+		t.Fatalf("%v", err)
+	}
+	if err := serveFails(t, hookConfig(t, dir, freeAddr(t), "api:\n  token_file: "+filepath.Join(dir, "none")+"\n")); !strings.Contains(err.Error(), "api.token_file") {
+		t.Fatalf("%v", err)
+	}
+}
+
+func TestQueueErrorsBecomeConflicts(t *testing.T) {
+	for _, err := range []error{queue.ErrFinished, queue.ErrNotFinished, queue.ErrRejected, queue.ErrQueueFull, queue.ErrClosed} {
+		if got := conflict(fmt.Errorf("wrapped: %w", err)); !errors.Is(got, control.ErrConflict) {
+			t.Errorf("%v is not a conflict", err)
+		}
+	}
+	other := errors.New("disk on fire")
+	if conflict(other) != other || conflict(nil) != nil {
+		t.Fatal("other errors, and success, pass through")
+	}
+	for d, want := range map[time.Duration]string{0: "0s", 150 * time.Second: "2m", 5 * time.Hour: "5h", 72 * time.Hour: "3d"} {
+		if got := since(time.Now().Add(-d)); got != want {
+			t.Errorf("since(%v) = %s, want %s", d, got, want)
+		}
+	}
+	if since(time.Time{}) != "-" {
+		t.Fatal("unknown time")
+	}
+}
+
+// stubJobs is a control.Jobs for commands that need a job in a state the dry-run runner never leaves behind.
+type stubJobs struct{ cancelled []job.ID }
+
+func (s *stubJobs) List(context.Context, job.Filter) ([]job.Job, error) {
+	code := 3
+	now := time.Now()
+	return []job.Job{
+		{ID: "f", Name: "github/acme/app", State: job.Failed, ExitCode: &code, CreatedAt: now.Add(-time.Hour)},
+		{ID: "r", Name: "github/acme/app", State: job.Running, CreatedAt: now},
+	}, nil
+}
+func (s *stubJobs) Get(_ context.Context, id job.ID) (job.Job, error) {
+	code := 5
+	return job.Job{ID: id, Name: "github/acme/app", Kind: "docker", State: job.Failed, ExitCode: &code, Error: "boom", RetryOf: "older",
+		CreatedAt: time.Now().Add(-time.Minute), StartedAt: time.Now().Add(-50 * time.Second), FinishedAt: time.Now().Add(-10 * time.Second)}, nil
+}
+func (s *stubJobs) Logs(job.ID, int64, int) ([]job.Entry, error) {
+	return []job.Entry{{Seq: 1, Time: time.Now(), Stream: "stdout", Text: "out"}, {Seq: 2, Time: time.Now(), Stream: "stderr", Text: "err"}, {Seq: 3, Time: time.Now(), Stream: "system", Text: "sys"}}, nil
+}
+func (s *stubJobs) Cancel(_ context.Context, id job.ID) error {
+	s.cancelled = append(s.cancelled, id)
+	return nil
+}
+func (s *stubJobs) Retry(context.Context, job.ID) (job.Job, error) {
+	return job.Job{}, nil
+}
+func (s *stubJobs) Subscribe() (<-chan control.Event, func()) {
+	ch := make(chan control.Event)
+	return ch, func() {}
+}
+
+func TestJobCommandsFormatWhatTheDaemonSends(t *testing.T) {
+	sock := filepath.Join(tmpDir(t), "c.sock")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	jobs := &stubJobs{}
+	ready := make(chan struct{})
+	go control.Serve(ctx, sock, control.Handlers{Status: func() control.Status { return control.Status{} }, Jobs: jobs}, func() { close(ready) })
+	<-ready
+	out, _, err := run(t, ctx, "jobs", "--socket", sock)
+	if err != nil || !strings.Contains(out, "failed (exit 3)") || !strings.Contains(out, "1h ago") || !strings.Contains(out, "running") {
+		t.Fatalf("%v %q", err, out)
+	}
+	out, _, err = run(t, ctx, "job", "x", "--socket", sock)
+	for _, want := range []string{"kind     docker", "exit     5", "error    boom", "retry of older", "started", "finished", "took 40s"} {
+		if err != nil || !strings.Contains(out, want) {
+			t.Fatalf("job lacks %q: %v\n%s", want, err, out)
+		}
+	}
+	out, _, err = run(t, ctx, "logs", "x", "--socket", sock)
+	if err != nil || !strings.Contains(out, "  out") || !strings.Contains(out, "! err") || !strings.Contains(out, "# sys") {
+		t.Fatalf("stream marks: %v %q", err, out)
+	}
+	out, _, err = run(t, ctx, "cancel", "x", "--socket", sock)
+	if err != nil || !strings.Contains(out, "cancelling x") || len(jobs.cancelled) != 1 {
+		t.Fatalf("%v %q", err, out)
 	}
 }

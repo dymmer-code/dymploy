@@ -31,6 +31,9 @@ type Config struct {
 	// Targets are the places a build may be deployed to, by name. A repository's dymploy.yaml only names
 	// one; where it is, how to log in and who may use it is decided here.
 	Targets map[string]TargetConfig `yaml:"targets"`
+	// API opens a read-only view of the jobs (and the live channel) on the public listener. Without a
+	// token file it stays closed: the control socket is always available to the local user.
+	API APIConfig `yaml:"api"`
 	// WebhookMaxBody is the largest accepted webhook body, in bytes.
 	WebhookMaxBody int64 `yaml:"webhook_max_body_bytes"`
 	// WebhookRatePerMinute limits webhook requests per minute across all providers; 0 disables it.
@@ -96,6 +99,16 @@ type WebhookConfig struct {
 	// neither). The key file must not be readable by other users.
 	AppID          int64  `yaml:"app_id"`
 	PrivateKeyFile string `yaml:"private_key_file"`
+}
+
+// APIConfig configures the read-only API of the public listener, under /api/v1/.
+type APIConfig struct {
+	// TokenFile holds the bearer token clients must send (not readable by others). Empty = no API.
+	TokenFile string `yaml:"token_file"`
+	// AllowedOrigins are the web origins (host patterns) that may open the live channel from a browser.
+	AllowedOrigins []string `yaml:"allowed_origins"`
+	// MaxStreams bounds the live channels open at once; 0 means 16.
+	MaxStreams int `yaml:"max_streams"`
 }
 
 // TargetConfig is a deployment target reached over SSH. The key and the known_hosts file are paths to
@@ -224,7 +237,27 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("policy[%d]: %w", i, err)
 		}
 	}
+	if err := c.API.validate(); err != nil {
+		return err
+	}
 	return c.validateTargets()
+}
+
+func (a APIConfig) validate() error {
+	switch {
+	case a.TokenFile != "" && !filepath.IsAbs(a.TokenFile):
+		return fmt.Errorf("api.token_file %q must be an absolute path", a.TokenFile)
+	case a.TokenFile == "" && (len(a.AllowedOrigins) > 0 || a.MaxStreams != 0):
+		return errors.New("api.allowed_origins and api.max_streams need api.token_file: without a token the API is closed")
+	case a.MaxStreams < 0:
+		return errors.New("api.max_streams must not be negative")
+	}
+	for _, o := range a.AllowedOrigins {
+		if _, err := path.Match(o, "x"); err != nil || o == "" {
+			return fmt.Errorf("api.allowed_origins: %q is not a valid pattern", o)
+		}
+	}
+	return nil
 }
 
 var (
