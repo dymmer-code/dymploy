@@ -1,4 +1,5 @@
-# An Elixir release built for Debian 13 and deployed to the "production" target, with a way back.
+# An Elixir release built for Debian 13 and deployed to the "production" target. The previous release is kept
+# next to it so that it can be put back by hand; dymploy itself never undoes a deployment.
 version: 1
 
 build:
@@ -41,10 +42,3 @@ deploy:
     run: curl -fsS http://127.0.0.1:4022/healthz
     attempts: 10
     interval: 3s
-  rollback:                                  # without this section a failed deploy is NOT undone
-    steps:
-      - run: sudo systemctl stop shop || true
-      - run: |
-          rm -rf /srv/apps/shop
-          mv /srv/apps/shop.previous /srv/apps/shop
-      - run: sudo systemctl start shop

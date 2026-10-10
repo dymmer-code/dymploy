@@ -146,17 +146,15 @@ func TestAFailingStepStopsTheDeploymentAndNothingIsUndone(t *testing.T) {
 		}
 		return 0, "", false
 	}
-	d := definition(t, simple[:strings.Index(simple, "    - {name: start")]+"  rollback:\n    steps: [{run: \"undo\"}]\n")
+	d := definition(t, simple)
 	code, err := f.run(context.Background(), d)
 	if err != nil || code != deploy.ExitStep {
 		t.Fatalf("code=%d err=%v", code, err)
 	}
-	for _, s := range f.fake.Scripts() {
-		if s == "undo" {
-			t.Fatal("rollback must not be run")
-		}
+	if got := strings.Join(f.fake.Scripts(), "|"); got != "install it" {
+		t.Fatalf("the steps after the failing one must not run: %s", got)
 	}
-	if !strings.Contains(f.log(), "nothing was undone") || !strings.Contains(f.log(), "does not run it") || !strings.Contains(f.log(), "exit code 3") {
+	if !strings.Contains(f.log(), "nothing was undone") || !strings.Contains(f.log(), "exit code 3") {
 		t.Fatalf("the log must say what is true after a failure:\n%s", f.log())
 	}
 	if len(f.fake.Removed) != 1 {

@@ -85,8 +85,7 @@ Answers: `202` accepted · `200` ignored (ping, other events, deleted refs) or d
 ## The `dymploy.yaml` file
 
 Every repository that dymploy builds has a `dymploy.yaml` in its root. It says how to build (in Docker), what to
-pack, and where to deploy; see `examples/` for complete files (a release with rollback, a static site without
-one, a book). Check yours before pushing, and give your editor the schema:
+pack, and where to deploy; see `examples/` for complete files (a release, a static site, a book). Check yours before pushing, and give your editor the schema:
 
 ```sh
 dymploy validate            # looks for dymploy.yaml in the current directory; reports every problem at once
@@ -106,9 +105,6 @@ deploy:
   target: production                     # a NAME configured on the dymploy server, never a host or a user
   steps:
     - run: tar -xzf "$DYMPLOY_ARTIFACT" -C /srv/apps/app --strip-components=1
-  rollback:                         # optional: without it a failed deploy is NOT undone
-    steps:
-      - run: echo "how to go back"
 ```
 
 The file is treated as untrusted: unknown keys, anchors and aliases are errors, every size is bounded, paths
@@ -221,7 +217,7 @@ the target.
 Exit codes: 4 target missing or denied, 5 a deploy step failed, 6 the health check never passed, 7 an `after` step failed
 (the deployment itself is done), 124 `deploy.timeout` ran out. A target that cannot be reached or a damaged upload is an
 error of the runner instead. **There is no automatic undo**: on failure whatever the steps already did stays as it is and
-the log says so. A `deploy.rollback` section is accepted by the format but not run by this version (re-running the deploy of a previous job is being considered instead).
+the log says so. The format has no `rollback` section on purpose (re-running the deploy of a previous job is being considered instead).
 
 Nothing outside `internal/runner/docker` knows about containers (`internal/architecture` enforces it, and the same for SSH, which only `cmd` and `internal/deploy/sshremote` know). Tests against a
 real engine are tagged: `go test -tags integration ./internal/runner/docker/` (and `./internal/deploy/sshremote/` against a real OpenSSH, see the file's header) (set `DYMPLOY_IT_DIR` under your home when

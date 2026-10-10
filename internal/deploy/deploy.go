@@ -224,11 +224,7 @@ func (d *Deployer) Run(parent context.Context, r Request) (int, error) {
 
 // noUndo tells, in the log, what is true after a failure: nothing is rolled back.
 func (d *Deployer) noUndo(r Request) {
-	msg := "nothing was undone: what the steps already did stays as it is on " + r.Target.Name
-	if r.Deploy.Rollback != nil {
-		msg += " (deploy.rollback is defined but this version of dymploy does not run it)"
-	}
-	r.Log.System(msg)
+	r.Log.System("nothing was undone: what the steps already did stays as it is on " + r.Target.Name)
 }
 
 func stepName(name string, i int) string {

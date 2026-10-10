@@ -38,16 +38,13 @@ func TestEveryExampleIsValid(t *testing.T) {
 	}
 }
 
-func TestTheExamplesCoverBothSidesOfRollback(t *testing.T) {
+func TestTheExamplesCoverDeployingAndNot(t *testing.T) {
 	read := func(n string) *Manifest {
 		b, _ := os.ReadFile(filepath.Join(examplesDir(t), n))
 		return mustParse(t, string(b))
 	}
-	if !read("elixir-release.yaml").HasRollback() {
-		t.Fatal("the release example defines a way back")
-	}
-	if s := read("static-site.yaml"); !s.HasDeploy() || s.HasRollback() {
-		t.Fatal("the static site example deploys without a rollback")
+	if !read("elixir-release.yaml").HasDeploy() || !read("static-site.yaml").HasDeploy() {
+		t.Fatal("the release and static site examples deploy")
 	}
 	if read("book.yaml").HasDeploy() {
 		t.Fatal("the book example only builds")

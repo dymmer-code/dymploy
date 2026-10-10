@@ -618,7 +618,7 @@ func TestValidateAcceptsAGoodFileAndSummarizesIt(t *testing.T) {
 	p := writeManifest(t, dir, "dymploy.yaml", goodManifest)
 	for _, arg := range []string{p, dir} { // a file, or the directory that holds it
 		out, _, err := run(t, context.Background(), "validate", arg)
-		if err != nil || !strings.Contains(out, "OK") || !strings.Contains(out, "deploy: production") || !strings.Contains(out, "rollback: none") {
+		if err != nil || !strings.Contains(out, "OK") || !strings.Contains(out, "deploy: production") {
 			t.Fatalf("%s: out=%q err=%v", arg, out, err)
 		}
 	}

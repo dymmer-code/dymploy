@@ -1,5 +1,5 @@
-# A static site: built with Node, copied to the "web" target. No rollback section: if the copy
-# fails, dymploy reports it and leaves the state as it is.
+# A static site: built with Node, copied to the "web" target. If the copy fails, dymploy reports it
+# and leaves the state as it is.
 version: 1
 
 build:

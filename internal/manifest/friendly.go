@@ -20,7 +20,7 @@ var places = map[string]string{
 	"Artifact":   "artifact",
 	"Deploy":     "deploy",
 	"DeployStep": "a deploy step",
-	"StepList":   "deploy.rollback or deploy.after",
+	"StepList":   "deploy.after",
 	"Check":      "deploy.check",
 }
 
@@ -45,6 +45,9 @@ func friendly(msg string) string {
 			in = "at the top level"
 		}
 		out += " " + in
+	}
+	if typ == "Deploy" && key == "rollback" {
+		return out + " (there is no rollback: dymploy never undoes a deployment on its own)"
 	}
 	if best := closest(key, keysOf(types[typ])); best != "" {
 		out += fmt.Sprintf(" (did you mean %q?)", best)

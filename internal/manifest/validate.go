@@ -164,12 +164,6 @@ func (v *validator) deploy(d *Deploy) {
 		v.duration("deploy.check.interval", c.Interval, time.Second, 5*time.Minute)
 		v.duration("deploy.check.timeout", c.Timeout, time.Second, 10*time.Minute)
 	}
-	if d.Rollback != nil {
-		if len(d.Rollback.Steps) == 0 {
-			v.add("deploy.rollback.steps", "a rollback section needs at least one step (leave it out if there is no way back)")
-		}
-		v.deploySteps("deploy.rollback.steps", d.Rollback.Steps)
-	}
 	if d.After != nil {
 		if len(d.After.Steps) == 0 {
 			v.add("deploy.after.steps", "an after section needs at least one step")

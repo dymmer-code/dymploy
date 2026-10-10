@@ -57,10 +57,6 @@ deploy:
     attempts: 10
     interval: 3s
     timeout: 5s
-  rollback:
-    steps:
-      - run: sudo systemctl stop shop || true
-      - run: mv /srv/apps/shop.previous /srv/apps/shop
   after:
     steps:
       - run: echo done
@@ -88,7 +84,7 @@ func TestMinimalManifestGetsDefaults(t *testing.T) {
 	if m.Build.Network != "default" || m.Build.Limits.Timeout.D() != 30*time.Minute {
 		t.Fatalf("defaults: %+v", m.Build)
 	}
-	if m.Deploy != nil || m.HasDeploy() || m.HasRollback() {
+	if m.Deploy != nil || m.HasDeploy() {
 		t.Fatal("a manifest without deploy only builds")
 	}
 }
@@ -114,18 +110,15 @@ func TestFullManifest(t *testing.T) {
 	if d.Check == nil || d.Check.Attempts != 10 || d.Check.Interval.D() != 3*time.Second || d.Check.Timeout.D() != 5*time.Second {
 		t.Fatalf("%+v", d.Check)
 	}
-	if !m.HasRollback() || len(d.Rollback.Steps) != 2 || d.After == nil || len(d.After.Steps) != 1 {
+	if d.After == nil || len(d.After.Steps) != 1 {
 		t.Fatalf("%+v", d)
 	}
 }
 
-func TestRollbackExistsOnlyWhenDefined(t *testing.T) {
-	without := strings.Replace(full, "  rollback:\n    steps:\n      - run: sudo systemctl stop shop || true\n      - run: mv /srv/apps/shop.previous /srv/apps/shop\n", "", 1)
-	if mustParse(t, without).HasRollback() {
-		t.Fatal("no rollback section means no rollback: dymploy never invents one")
-	}
-	if !mustParse(t, full).HasRollback() {
-		t.Fatal("rollback is defined")
+func TestThereIsNoRollbackAndTheErrorSaysSo(t *testing.T) {
+	_, err := Parse([]byte(minimal + "deploy:\n  target: production\n  steps: [{run: x}]\n  rollback: {steps: [{run: y}]}\n"))
+	if err == nil || !strings.Contains(err.Error(), `unknown key "rollback" in deploy`) || !strings.Contains(err.Error(), "never undoes") {
+		t.Fatalf("a removed key should be explained: %v", err)
 	}
 }
 
@@ -187,7 +180,6 @@ func TestInvalidManifests(t *testing.T) {
 		{"deploy step image", minimal + "deploy:\n  target: production\n  steps:\n    - {run: x, image: foo}\n", "image"},
 		{"check without run", minimal + "deploy:\n  target: production\n  steps: [{run: x}]\n  check: {attempts: 3}\n", "deploy.check.run"},
 		{"check too many retries", minimal + "deploy:\n  target: production\n  steps: [{run: x}]\n  check: {run: y, attempts: 1000}\n", "deploy.check.attempts"},
-		{"empty rollback", minimal + "deploy:\n  target: production\n  steps: [{run: x}]\n  rollback: {steps: []}\n", "deploy.rollback.steps"},
 		{"empty after", minimal + "deploy:\n  target: production\n  steps: [{run: x}]\n  after: {steps: []}\n", "deploy.after.steps"},
 		{"run too long", strings.Replace(minimal, "run: make", "run: "+strings.Repeat("x", 9000), 1), "build.steps[0].run"},
 		{"too many steps", strings.Replace(minimal, "    - run: make\n", strings.Repeat("    - run: x\n", 101), 1), "build.steps"},
@@ -254,7 +246,7 @@ func TestUnknownKeysSaySoInPlainWords(t *testing.T) {
 		"version: 1\ndeploy:\n  targt: x\n":                        `unknown key "targt" in deploy (did you mean "target"?)`,
 		"version: 1\ndeploy:\n  steps: [{run: x, image: y}]\n":     `in a deploy step`,
 		"version: 1\ndeploy:\n  check: {runn: x}\n":                `in deploy.check`,
-		"version: 1\ndeploy:\n  rollback: {stepz: []}\n":           `in deploy.rollback or deploy.after`,
+		"version: 1\ndeploy:\n  after: {stepz: []}\n":              `in deploy.after`,
 		"version: 1\nbuild:\n  cache: [{nme: a}]\n":                `in a build cache entry`,
 		"version: 1\nbuild:\n  limits: {cpus: 1, zzzzzzzzzz: 1}\n": `unknown key "zzzzzzzzzz"`,
 	}
@@ -319,7 +311,7 @@ func TestCheckFilesNeedsTheDockerfile(t *testing.T) {
 
 func TestSummary(t *testing.T) {
 	s := mustParse(t, full).Summary()
-	for _, want := range []string{"build: 2 steps", "artifact: shop", "deploy: production", "rollback: defined"} {
+	for _, want := range []string{"build: 2 steps", "artifact: shop", "deploy: production"} {
 		if !strings.Contains(s, want) {
 			t.Errorf("missing %q in %q", want, s)
 		}

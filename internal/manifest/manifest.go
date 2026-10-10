@@ -80,12 +80,11 @@ type Artifact struct {
 
 // Deploy delivers the artifact to a target and runs the commands that install it.
 type Deploy struct {
-	Target   string       `yaml:"target"`
-	Timeout  Duration     `yaml:"timeout"`
-	Steps    []DeployStep `yaml:"steps"`
-	Check    *Check       `yaml:"check"`
-	Rollback *StepList    `yaml:"rollback"`
-	After    *StepList    `yaml:"after"`
+	Target  string       `yaml:"target"`
+	Timeout Duration     `yaml:"timeout"`
+	Steps   []DeployStep `yaml:"steps"`
+	Check   *Check       `yaml:"check"`
+	After   *StepList    `yaml:"after"`
 }
 
 // DeployStep is a command run on the target.
@@ -118,9 +117,6 @@ func Schema() []byte { return schema }
 // HasDeploy reports whether the manifest delivers the artifact anywhere.
 func (m *Manifest) HasDeploy() bool { return m.Deploy != nil }
 
-// HasRollback reports whether a way back was defined. dymploy never invents one.
-func (m *Manifest) HasRollback() bool { return m.Deploy != nil && m.Deploy.Rollback != nil }
-
 // Summary is a one-line description for humans.
 func (m *Manifest) Summary() string {
 	steps := fmt.Sprintf("%d steps", len(m.Build.Steps))
@@ -130,11 +126,6 @@ func (m *Manifest) Summary() string {
 	parts := []string{"build: " + steps, "artifact: " + m.Artifact.Name}
 	if m.Deploy != nil {
 		parts = append(parts, "deploy: "+m.Deploy.Target)
-		if m.HasRollback() {
-			parts = append(parts, "rollback: defined")
-		} else {
-			parts = append(parts, "rollback: none")
-		}
 	}
 	return strings.Join(parts, ", ")
 }
