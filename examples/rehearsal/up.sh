@@ -21,7 +21,7 @@ docker rm -f dy-db dy-production >/dev/null 2>&1 || true
 docker run -d --name dy-db --network dy-net -e POSTGRES_USER=shop -e POSTGRES_PASSWORD=rehearsal-pw \
   -e POSTGRES_DB=shop_prod postgres:17 >/dev/null
 docker build -q -t dy-production production >/dev/null
-docker run -d --name dy-production --network dy-net -p 127.0.0.1:2222:22 dy-production >/dev/null
+docker run -d --name dy-production --network dy-net -p 127.0.0.1:2222:22 -p 127.0.0.1:4022:4022 dy-production >/dev/null
 docker exec dy-production sh -c "printf 'DATABASE_URL=ecto://shop:rehearsal-pw@dy-db/shop_prod\nSECRET_KEY_BASE=%s\nDOMAIN=shop.test\nPORT=4022\nMAILGUN_API_KEY=x\nMAILGUN_DOMAIN=x\n' \$(openssl rand -hex 48) > /etc/shop.env; chmod 640 /etc/shop.env; chgrp shop /etc/shop.env"
 
 # the host key is taken from the machine itself, as an operator would when adding a target
@@ -52,4 +52,4 @@ CFG
 [ -f etc/webhook-secret ] || { openssl rand -hex 24 > etc/webhook-secret; chmod 600 etc/webhook-secret; }
 echo "ready. Try it from the repository to deploy:"
 echo "  dymploy try --deploy --config $dir/etc/config.yaml"
-echo "and look at the result:  docker exec dy-production curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:4022/"
+echo "and look at the result in a browser:  http://127.0.0.1:4022/"
