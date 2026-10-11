@@ -75,3 +75,18 @@ func TestConcurrencyIsMeasured(t *testing.T) {
 		t.Fatalf("max=%d a=%d b=%d calls=%d", f.MaxConcurrent(), f.MaxConcurrentFor("a"), f.MaxConcurrentFor("b"), len(f.Calls()))
 	}
 }
+
+func TestAGatesChannelIsClosedOnceItIsOpen(t *testing.T) {
+	g := NewGate()
+	select {
+	case <-g.Chan():
+		t.Fatal("closed gate")
+	default:
+	}
+	g.Open()
+	select {
+	case <-g.Chan():
+	default:
+		t.Fatal("open gate")
+	}
+}
