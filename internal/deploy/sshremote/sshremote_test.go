@@ -298,6 +298,17 @@ func TestUploadRefusals(t *testing.T) {
 	}
 }
 
+// readyWriter calls fn the first time anything is written to it.
+type readyWriter struct {
+	once sync.Once
+	fn   func()
+}
+
+func (w *readyWriter) Write(p []byte) (int, error) {
+	w.once.Do(w.fn)
+	return len(p), nil
+}
+
 func TestCancellingAsksTheCommandToStopBeforeKillingIt(t *testing.T) {
 	old := termGrace
 	termGrace = 300 * time.Millisecond
@@ -308,9 +319,10 @@ func TestCancellingAsksTheCommandToStopBeforeKillingIt(t *testing.T) {
 	// a command that cleans up when asked: it gets TERM and the time to do it
 	marker := filepath.Join(r.srv.home, "cleaned-up")
 	ctx, cancel := context.WithCancel(context.Background())
-	time.AfterFunc(300*time.Millisecond, cancel)
+	// cancel only once the trap is installed, or a slow machine delivers TERM before the shell is ready
+	ready := &readyWriter{fn: cancel}
 	start := time.Now()
-	_, err := c.Run(ctx, "trap 'touch cleaned-up; exit 0' TERM; sleep 30 & wait", nil, io.Discard, io.Discard)
+	_, err := c.Run(ctx, "trap 'touch cleaned-up; exit 0' TERM; echo ready; sleep 30 & wait", nil, ready, io.Discard)
 	if err != context.Canceled {
 		t.Fatalf("%v", err)
 	}
@@ -327,12 +339,12 @@ func TestCancellingAsksTheCommandToStopBeforeKillingIt(t *testing.T) {
 
 	// one that ignores TERM is killed after the grace period, not left running
 	ctx2, cancel2 := context.WithCancel(context.Background())
-	time.AfterFunc(200*time.Millisecond, cancel2)
+	ready2 := &readyWriter{fn: cancel2}
 	start = time.Now()
-	if _, err := c.Run(ctx2, "trap '' TERM; while true; do sleep 1; done", nil, io.Discard, io.Discard); err != context.Canceled {
+	if _, err := c.Run(ctx2, "trap '' TERM; echo ready; while true; do sleep 1; done", nil, ready2, io.Discard); err != context.Canceled {
 		t.Fatalf("%v", err)
 	}
-	if d := time.Since(start); d < 400*time.Millisecond || d > 5*time.Second {
+	if d := time.Since(start); d < 250*time.Millisecond || d > 5*time.Second {
 		t.Fatalf("TERM, a grace period, then KILL: took %s", d)
 	}
 }
