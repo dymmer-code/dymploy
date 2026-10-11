@@ -1,0 +1,18 @@
+# dymploy checks itself with itself: vet and the tests, nothing is packed or deployed.
+version: 1
+
+build:
+  image: {from: "golang:1.26"}
+  env:
+    GOCACHE: /cache/go-build
+    GOMODCACHE: /cache/go-mod
+    GOFLAGS: -buildvcs=false
+  cache:
+    - {name: go-build, path: /cache/go-build}
+    - {name: go-mod, path: /cache/go-mod}
+  limits: {cpus: 2, memory: 3g, timeout: 20m}
+  steps:
+    - name: vet
+      run: go vet ./...
+    - name: tests
+      run: go test -race ./...
