@@ -41,6 +41,8 @@ func (e *Enqueuer) Enqueue(ctx context.Context, ev provider.Event) error {
 		return webhook.ErrQueueFull
 	case errors.Is(err, queue.ErrRejected):
 		return webhook.ErrDropped
+	case errors.Is(err, queue.ErrDraining), errors.Is(err, queue.ErrClosed):
+		return webhook.ErrShuttingDown
 	}
 	return err
 }

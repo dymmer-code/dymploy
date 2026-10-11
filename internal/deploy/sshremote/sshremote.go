@@ -140,6 +140,9 @@ func (r *Remote) connect(ctx context.Context, t deploy.Target, cfg *ssh.ClientCo
 	return &conn{client: ssh.NewClient(cc, chans, reqs)}, nil
 }
 
+// termGrace is how long a command gets to end after TERM before it is killed.
+var termGrace = 5 * time.Second
+
 type conn struct{ client *ssh.Client }
 
 func (c *conn) Close() error { return c.client.Close() }
@@ -197,7 +200,15 @@ func (c *conn) exec(ctx context.Context, cmd string, stdin io.Reader, stdout, st
 	go func() { done <- sess.Wait() }()
 	select {
 	case <-ctx.Done():
-		_ = sess.Signal(ssh.SIGKILL) // honored by recent OpenSSH; closing the session ends it anyway
+		// Ask first, then insist: TERM lets the command clean up; if it is still there after termGrace
+		// the signal is KILL and the session is closed. (OpenSSH delivers signals to the command's
+		// shell only: processes the script started may outlive it, so steps should be short and safe to repeat.)
+		_ = sess.Signal(ssh.SIGTERM)
+		select {
+		case <-done:
+		case <-time.After(termGrace):
+			_ = sess.Signal(ssh.SIGKILL)
+		}
 		sess.Close()
 		return 0, ctx.Err()
 	case err := <-done:

@@ -1018,8 +1018,8 @@ func TestJobsCommandsShowWhatHappened(t *testing.T) {
 		t.Fatalf("logs -f: %v %q", err, out)
 	}
 
-	if _, _, err := run(t, ctx, "cancel", id, "--config", cfg); err == nil || !strings.Contains(err.Error(), "already finished") {
-		t.Fatalf("a finished job cannot be cancelled: %v", err)
+	if _, _, err := run(t, ctx, "abort", id, "--config", cfg); err == nil || !strings.Contains(err.Error(), "already finished") {
+		t.Fatalf("a finished job cannot be aborted: %v", err)
 	}
 	out, _, err = run(t, ctx, "retry", id, "--config", cfg)
 	if err != nil || !strings.Contains(out, "retry of "+id) {
@@ -1104,7 +1104,7 @@ func (s *syncBuffer) String() string { s.mu.Lock(); defer s.mu.Unlock(); return 
 
 func TestJobCommandsWithoutADaemon(t *testing.T) {
 	sock := filepath.Join(tmpDir(t), "none.sock")
-	for _, args := range [][]string{{"jobs"}, {"job", "x"}, {"logs", "x"}, {"logs", "x", "-f"}, {"cancel", "x"}, {"retry", "x"}, {"watch"}} {
+	for _, args := range [][]string{{"jobs"}, {"job", "x"}, {"logs", "x"}, {"logs", "x", "-f"}, {"abort", "x"}, {"retry", "x"}, {"watch"}} {
 		_, _, err := run(t, context.Background(), append(args, "--socket", sock)...)
 		if err == nil || !strings.Contains(err.Error(), "cannot reach the daemon") {
 			t.Errorf("%v: %v", args, err)
@@ -1115,7 +1115,7 @@ func TestJobCommandsWithoutADaemon(t *testing.T) {
 func TestJobCommandsWithABrokenConfiguration(t *testing.T) {
 	p := filepath.Join(tmpDir(t), "broken.yaml")
 	os.WriteFile(p, []byte("listen: nope\n"), 0o600)
-	for _, args := range [][]string{{"jobs"}, {"job", "x"}, {"logs", "x"}, {"cancel", "x"}, {"retry", "x"}, {"watch"}} {
+	for _, args := range [][]string{{"jobs"}, {"job", "x"}, {"logs", "x"}, {"abort", "x"}, {"retry", "x"}, {"watch"}} {
 		if _, _, err := run(t, context.Background(), append(args, "--config", p)...); err == nil || !strings.Contains(err.Error(), "broken.yaml") {
 			t.Errorf("%v: %v", args, err)
 		}
@@ -1236,6 +1236,7 @@ func TestQueueErrorsBecomeConflicts(t *testing.T) {
 // stubJobs is a control.Jobs for commands that need a job in a state the dry-run runner never leaves behind.
 type stubJobs struct {
 	cancelled []job.ID
+	reasons   []string
 	queued    []control.EnqueueRequest
 }
 
@@ -1255,8 +1256,9 @@ func (s *stubJobs) Get(_ context.Context, id job.ID) (job.Job, error) {
 func (s *stubJobs) Logs(job.ID, int64, int) ([]job.Entry, error) {
 	return []job.Entry{{Seq: 1, Time: time.Now(), Stream: "stdout", Text: "out"}, {Seq: 2, Time: time.Now(), Stream: "stderr", Text: "err"}, {Seq: 3, Time: time.Now(), Stream: "system", Text: "sys"}}, nil
 }
-func (s *stubJobs) Cancel(_ context.Context, id job.ID) error {
+func (s *stubJobs) Abort(_ context.Context, id job.ID, reason string) error {
 	s.cancelled = append(s.cancelled, id)
+	s.reasons = append(s.reasons, reason)
 	return nil
 }
 func (s *stubJobs) Retry(context.Context, job.ID) (job.Job, error) {
@@ -1293,8 +1295,8 @@ func TestJobCommandsFormatWhatTheDaemonSends(t *testing.T) {
 	if err != nil || !strings.Contains(out, "  out") || !strings.Contains(out, "! err") || !strings.Contains(out, "# sys") {
 		t.Fatalf("stream marks: %v %q", err, out)
 	}
-	out, _, err = run(t, ctx, "cancel", "x", "--socket", sock)
-	if err != nil || !strings.Contains(out, "cancelling x") || len(jobs.cancelled) != 1 {
+	out, _, err = run(t, ctx, "abort", "x", "--reason", "the repository moved", "--socket", sock)
+	if err != nil || !strings.Contains(out, "stop requested for x") || len(jobs.cancelled) != 1 || jobs.reasons[0] != "the repository moved" {
 		t.Fatalf("%v %q", err, out)
 	}
 }
@@ -1322,7 +1324,7 @@ func newManualRig(t *testing.T, providers map[string]provider.Provider) *manualR
 	if err := mgr.Start(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { shutdownQueue(mgr) })
+	t.Cleanup(func() { shutdownQueue(mgr, 5*time.Second) })
 	enq := intake.New(mgr, "dryrun", nil)
 	r.rc = &webhook.Receiver{
 		Providers: providers,
@@ -1430,7 +1432,7 @@ func TestAJobStartedByHandObeysTheQueueRules(t *testing.T) {
 	mgr, _ := queue.New(queue.Config{MaxConcurrent: 1, MaxPending: 5, OnBusy: queue.Policy("reject")},
 		queue.Deps{Store: job.NewMemStore(), Logs: job.NewMemLogs(), Runners: reg, Log: slog.New(slog.NewTextHandler(io.Discard, nil))})
 	mgr.Start(ctx)
-	defer func() { gate.Open(); shutdownQueue(mgr) }()
+	defer func() { gate.Open(); shutdownQueue(mgr, 5*time.Second) }()
 	r.jobs.m, r.jobs.enq = mgr, intake.New(mgr, "hold", nil)
 	if _, err := r.jobs.Enqueue(ctx, control.EnqueueRequest{Repo: "fake/acme/app", Ref: "main"}); err != nil {
 		t.Fatal(err)

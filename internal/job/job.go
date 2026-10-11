@@ -27,20 +27,24 @@ func NewID(now time.Time) ID {
 // State of a job.
 type State string
 
-// The states of a job. Succeeded, Failed, Canceled and Interrupted are final.
+// The states of a job. Succeeded, Failed, Aborted and Interrupted are final.
 const (
-	Queued      State = "queued"
-	Running     State = "running"
-	Succeeded   State = "succeeded"
-	Failed      State = "failed"
-	Canceled    State = "canceled"
-	Interrupted State = "interrupted" // the daemon stopped while it was running; it is NOT retried by itself
+	Queued    State = "queued"
+	Running   State = "running"
+	Succeeded State = "succeeded"
+	Failed    State = "failed"
+	// Aborted: the job was asked to stop (by a person, by a configuration that no longer allows it, or
+	// because dymploy was stopped) and its processes were stopped. StopReason says why.
+	Aborted State = "aborted"
+	// Interrupted: dymploy died while the job was running, so nobody got to stop it properly. Found
+	// when the next run starts; the job is NOT retried by itself.
+	Interrupted State = "interrupted"
 )
 
 // Final reports whether a job in this state will not change any more.
 func (s State) Final() bool {
 	switch s {
-	case Succeeded, Failed, Canceled, Interrupted:
+	case Succeeded, Failed, Aborted, Interrupted:
 		return true
 	}
 	return false
@@ -61,9 +65,13 @@ type Job struct {
 	FinishedAt time.Time `json:"finished_at,omitzero"`
 	// ExitCode is set when the work ran to the end.
 	ExitCode *int `json:"exit_code,omitempty"`
-	// Error says why a job ended without an exit code, or why it was superseded or interrupted.
-	Error   string `json:"error,omitempty"`
-	RetryOf ID     `json:"retry_of,omitempty"`
+	// Error says why a job ended without an exit code (or was interrupted by a crash).
+	Error string `json:"error,omitempty"`
+	// StopRequestedAt and StopReason are set the moment a stop is asked for, while the job is still
+	// stopping, and stay with the job as the record of why it was aborted.
+	StopRequestedAt time.Time `json:"stop_requested_at,omitzero"`
+	StopReason      string    `json:"stop_reason,omitempty"`
+	RetryOf         ID        `json:"retry_of,omitempty"`
 }
 
 // Filter selects jobs for List.

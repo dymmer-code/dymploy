@@ -215,3 +215,42 @@ artifact: {paths: [x]}
 		t.Fatalf("a build that exceeds its memory must fail: %+v %v\n%s", res, err, r.log())
 	}
 }
+
+// A stop is a request: the container's process gets SIGTERM and the chance to finish what it is doing,
+// and only after the grace period is it killed.
+func TestRealStopLetsTheProcessCleanUp(t *testing.T) {
+	_, r := realRig(t, `version: 1
+build:
+  image: {from: "alpine:3"}
+  steps:
+    - name: long work
+      run: |
+        trap 'echo GOT-TERM-CLEANING-UP; exit 0' TERM
+        echo working
+        sleep 120 &
+        wait
+artifact: {paths: [x]}
+`, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		for i := 0; i < 200 && !strings.Contains(r.log(), "working"); i++ {
+			time.Sleep(50 * time.Millisecond)
+		}
+		cancel()
+	}()
+	start := time.Now()
+	if _, err := r.do(ctx); err == nil || ctx.Err() == nil {
+		t.Fatalf("err=%v", err)
+	}
+	if d := time.Since(start); d > 9*time.Second {
+		t.Fatalf("the container was killed after the whole grace period instead of ending when asked: %s", d)
+	}
+	log := r.log()
+	if !strings.Contains(log, "GOT-TERM-CLEANING-UP") || !strings.Contains(log, "stopping the container") {
+		t.Fatalf("the process must see SIGTERM and the story must tell it:\n%s", log)
+	}
+	out, _ := exec.Command("docker", "ps", "-aq", "--filter", "label=dymploy.job=job-1").Output()
+	if strings.TrimSpace(string(out)) != "" {
+		t.Fatalf("containers left behind: %q", out)
+	}
+}

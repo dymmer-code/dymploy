@@ -84,12 +84,27 @@ func (c *Client) Logs(ctx context.Context, id string, after int64, limit int) ([
 	return out, err
 }
 
-// Cancel stops a job.
-func (c *Client) Cancel(ctx context.Context, id string) (string, error) {
+// Abort asks a job to stop, saying why. It returns when the request is made, not when the job has stopped.
+func (c *Client) Abort(ctx context.Context, id, reason string) (string, error) {
 	var out struct {
 		Message string `json:"message"`
 	}
-	err := c.call(ctx, http.MethodPost, "/v1/jobs/"+url.PathEscape(id)+"/cancel", &out)
+	body, _ := json.Marshal(map[string]string{"reason": reason})
+	err := c.send(ctx, http.MethodPost, "/v1/jobs/"+url.PathEscape(id)+"/abort", body, &out)
+	return out.Message, err
+}
+
+// Stop asks the daemon to stop: gracefully (finish the work in hand, take no more) or by aborting what
+// runs. It returns what the daemon says it will do; the daemon goes away when it is safe.
+func (c *Client) Stop(ctx context.Context, graceful bool, reason string) (string, error) {
+	var out struct {
+		Message string `json:"message"`
+	}
+	body, _ := json.Marshal(map[string]any{"graceful": graceful, "reason": reason})
+	err := c.send(ctx, http.MethodPost, "/v1/stop", body, &out)
+	if err != nil && err.Error() == ErrNoStop.Error() {
+		return "", ErrNoStop
+	}
 	return out.Message, err
 }
 
@@ -137,7 +152,7 @@ func (c *Client) Watch(ctx context.Context, jobID string, after int64, fn func(M
 				return ErrNoJobs
 			}
 		}
-		return fmt.Errorf("cannot reach the daemon at %s (is it running? start it with `dymploy serve`): %w", c.Socket, err)
+		return fmt.Errorf("%w at %s (is it running? start it with `dymploy serve`): %v", ErrUnreachable, c.Socket, err)
 	}
 	defer conn.CloseNow()
 	conn.SetReadLimit(1 << 20)

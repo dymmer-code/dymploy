@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"os"
@@ -16,6 +17,9 @@ import (
 	"github.com/dymmer-code/dymploy/internal/config"
 	"github.com/dymmer-code/dymploy/internal/control"
 	"github.com/dymmer-code/dymploy/internal/deploy"
+	"github.com/dymmer-code/dymploy/internal/job"
+	"github.com/dymmer-code/dymploy/internal/provider"
+	"github.com/dymmer-code/dymploy/internal/queue"
 	"github.com/dymmer-code/dymploy/internal/webhook"
 )
 
@@ -32,6 +36,7 @@ type reloader struct {
 
 	remote  deploy.Remote
 	targets *deploy.Targets
+	mgr     *queue.Manager // jobs the new policy no longer allows are stopped; nil in tests
 }
 
 func policyRules(cfg *config.Config) webhook.Policy {
@@ -63,8 +68,41 @@ func (r *reloader) Reload() (string, error) {
 	}
 	r.cur = next
 	msg := fmt.Sprintf("configuration reloaded: %d policy rules, %d targets", len(next.Policy), len(next.Targets))
+	if n := r.stopDisallowed(); n > 0 {
+		msg += fmt.Sprintf("; stop requested for %s the new configuration no longer allows", plural(n, "job"))
+	}
 	r.log.Info(msg)
 	return msg, nil
+}
+
+// stopDisallowed asks the jobs that the policy in force no longer allows to stop. A repository that
+// leaves the policy does not just stop being accepted: what it still has waiting or running is stopped
+// properly (the same stop as `dymploy abort`, with the reason written down), never dropped.
+func (r *reloader) stopDisallowed() int {
+	if r.mgr == nil || r.hooks == nil {
+		return 0
+	}
+	ctx := context.Background()
+	jobs, err := r.mgr.List(ctx, job.Filter{States: []job.State{job.Queued, job.Running}})
+	if err != nil {
+		r.log.Error("could not list the jobs to check them against the new policy", "error", err)
+		return 0
+	}
+	stopped := 0
+	for _, j := range jobs {
+		var ev provider.Event
+		if json.Unmarshal(j.Input, &ev) != nil || ev.Provider == "" || ev.Owner == "" {
+			continue // not a job that came from a repository event: the policy says nothing about it
+		}
+		if allowed, why := r.hooks.Allowed(&ev); !allowed {
+			reason := "no longer allowed by the configuration after a reload (" + why + ")"
+			if err := r.mgr.Abort(ctx, j.ID, reason); err == nil {
+				r.log.Info("audit: job stopped because the new policy does not allow it", "job", j.ID, "name", j.Name, "reason", why)
+				stopped++
+			}
+		}
+	}
+	return stopped
 }
 
 // needRestart names the settings (by their key in the file) that differ between a and b, except those

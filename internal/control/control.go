@@ -22,6 +22,11 @@ type Status struct {
 	Version   string    `json:"version"`
 	PID       int       `json:"pid"`
 	StartedAt time.Time `json:"started_at"`
+	// State is running, draining (finishing the work in hand, taking no more, then stopping) or
+	// stopping (aborting what runs, then stopping). Queued and Running count the work.
+	State   string `json:"state,omitempty"`
+	Queued  int    `json:"queued"`
+	Running int    `json:"running"`
 }
 
 // Handlers are what the daemon offers through the socket. A nil Reload means the daemon cannot
@@ -33,7 +38,20 @@ type Handlers struct {
 	Reload func() (string, error)
 	// Jobs, if set, adds the job endpoints and the live channel (see API).
 	Jobs Jobs
+	// Stop, if set, lets a client ask the daemon to stop. graceful waits for the work in hand and
+	// refuses new work meanwhile; otherwise running jobs are aborted. It answers at once with what
+	// will happen; the daemon goes away when it is safe.
+	Stop func(graceful bool, reason string) (string, error)
+	// Closing, if set, is closed when the daemon starts to stop: live channels end with "going away".
+	Closing <-chan struct{}
 }
+
+// ErrUnreachable is returned by every client call when nothing answers on the socket: the daemon is
+// not running (or has just gone).
+var ErrUnreachable = errors.New("cannot reach the daemon")
+
+// ErrNoStop is returned by Client.Stop when the daemon cannot be stopped through the socket.
+var ErrNoStop = errors.New("this daemon cannot be stopped through the control socket")
 
 // ErrNoReload is returned by Client.Reload when the daemon cannot reload.
 var ErrNoReload = errors.New("this daemon cannot reload its configuration")
@@ -84,8 +102,30 @@ func Serve(ctx context.Context, path string, h Handlers, ready func()) error {
 		}
 		_ = json.NewEncoder(w).Encode(map[string]string{"message": msg})
 	})
+	mux.HandleFunc("POST /v1/stop", func(w http.ResponseWriter, r *http.Request) {
+		if h.Stop == nil {
+			reply(w, http.StatusNotImplemented, map[string]string{"error": ErrNoStop.Error()})
+			return
+		}
+		var req struct {
+			Graceful bool   `json:"graceful"`
+			Reason   string `json:"reason"`
+		}
+		dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4<<10))
+		dec.DisallowUnknownFields()
+		if err := dec.Decode(&req); err != nil {
+			reply(w, http.StatusBadRequest, map[string]string{"error": "send {\"graceful\": true|false, \"reason\": \"…\"}"})
+			return
+		}
+		msg, err := h.Stop(req.Graceful, req.Reason)
+		if err != nil {
+			reply(w, http.StatusConflict, map[string]string{"error": err.Error()})
+			return
+		}
+		reply(w, http.StatusAccepted, map[string]string{"message": msg})
+	})
 	if h.Jobs != nil {
-		api := (&API{Jobs: h.Jobs, MaxStreams: 64}).Handler()
+		api := (&API{Jobs: h.Jobs, MaxStreams: 64, Closing: h.Closing}).Handler()
 		for _, p := range []string{"/v1/jobs", "/v1/jobs/", "/v1/events", "/v1/queue"} {
 			mux.Handle(p, api)
 		}
@@ -186,7 +226,10 @@ func (c *Client) doBody(ctx context.Context, method, path string, body []byte, o
 	}
 	resp, err := hc.Do(req)
 	if err != nil {
-		return 0, fmt.Errorf("cannot reach the daemon at %s (is it running? start it with `dymploy serve`): %w", c.Socket, err)
+		if ctx.Err() != nil {
+			return 0, ctx.Err() // the caller gave up: that is not the daemon being gone
+		}
+		return 0, fmt.Errorf("%w at %s (is it running? start it with `dymploy serve`): %v", ErrUnreachable, c.Socket, err)
 	}
 	defer resp.Body.Close()
 	if err := json.NewDecoder(resp.Body).Decode(out); err != nil && resp.StatusCode == http.StatusOK {

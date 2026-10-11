@@ -41,7 +41,7 @@ func (q queueJobs) Logs(id job.ID, after int64, limit int) ([]job.Entry, error) 
 
 // conflict marks the errors that mean "not in this state" so that the API answers 409.
 func conflict(err error) error {
-	for _, c := range []error{queue.ErrFinished, queue.ErrNotFinished, queue.ErrRejected, queue.ErrQueueFull, queue.ErrClosed} {
+	for _, c := range []error{queue.ErrFinished, queue.ErrNotFinished, queue.ErrRejected, queue.ErrQueueFull, queue.ErrClosed, queue.ErrDraining} {
 		if errors.Is(err, c) {
 			return fmt.Errorf("%w: %s", control.ErrConflict, err)
 		}
@@ -49,9 +49,9 @@ func conflict(err error) error {
 	return err
 }
 
-func (q queueJobs) Cancel(ctx context.Context, id job.ID) error {
-	err := conflict(q.m.Cancel(ctx, id))
-	q.log.Info("audit: cancel requested through the control socket", "job", id, "ok", err == nil)
+func (q queueJobs) Abort(ctx context.Context, id job.ID, reason string) error {
+	err := conflict(q.m.Abort(ctx, id, reason))
+	q.log.Info("audit: stop of a job requested through the control socket", "job", id, "reason", reason, "ok", err == nil)
 	return err
 }
 func (q queueJobs) Retry(ctx context.Context, id job.ID) (job.Job, error) {
@@ -315,18 +315,22 @@ func newLogsCmd() *cobra.Command {
 	return c
 }
 
-func newCancelCmd() *cobra.Command {
-	var configPath, socket string
+func newAbortCmd() *cobra.Command {
+	var configPath, socket, reason string
 	c := &cobra.Command{
-		Use:   "cancel <id>",
-		Short: "Cancel a waiting or running job",
-		Args:  cobra.ExactArgs(1),
+		Use:   "abort <id>",
+		Short: "Stop a waiting or running job, saying why",
+		Long: `A waiting job never runs. A running job is asked to stop: its runner stops the processes it started
+(containers get a chance to end before being killed), releases what it holds, and only then the job is
+marked aborted, with the reason you give. The command returns once the request is made; follow the
+job with "dymploy logs -f <id>".`,
+		Args: cobra.ExactArgs(1),
 		RunE: func(c *cobra.Command, args []string) error {
 			cl, err := clientFor(socket, configPath)
 			if err != nil {
 				return err
 			}
-			msg, err := cl.Cancel(c.Context(), args[0])
+			msg, err := cl.Abort(c.Context(), args[0], reason)
 			if err != nil {
 				return err
 			}
@@ -335,6 +339,7 @@ func newCancelCmd() *cobra.Command {
 		},
 	}
 	socketFlags(c, &configPath, &socket)
+	c.Flags().StringVar(&reason, "reason", "", "why the job is being stopped (kept with the job)")
 	return c
 }
 

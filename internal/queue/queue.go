@@ -43,6 +43,9 @@ type Config struct {
 	MaxPending int
 	// OnBusy is the policy for a name that is busy; empty means Queue.
 	OnBusy Policy
+	// StopGrace is how long a job may take to stop before the daemon complains in its log (it cannot
+	// do more: only the runner can stop what it started). 0 means no complaint.
+	StopGrace time.Duration
 }
 
 // DefaultMaxPending bounds the waiting list when the configuration does not.
@@ -65,10 +68,18 @@ var (
 	ErrFinished    = errors.New("the job has already finished")
 	ErrNotFinished = errors.New("only a finished job can be retried")
 	ErrClosed      = errors.New("the queue is not accepting jobs")
-
-	errCanceledByUser = errors.New("canceled by user")
-	errShutdown       = errors.New("daemon stopped")
+	// ErrDraining is returned for new jobs while dymploy waits for the work in hand to end before
+	// stopping. Senders should try again later (or elsewhere).
+	ErrDraining = errors.New("dymploy is shutting down and not accepting new jobs")
 )
+
+// StopCause is why a job's context was cancelled: what runners see through context.Cause, and what the
+// queue records. Runners need not look at it; it is there for the ones that want to narrate.
+type StopCause struct {
+	Reason string
+}
+
+func (c *StopCause) Error() string { return "stop requested: " + c.Reason }
 
 // Request describes a job to submit.
 type Request struct {
@@ -85,8 +96,10 @@ type EventType string
 
 // The events.
 const (
-	EventQueued   EventType = "queued"
-	EventStarted  EventType = "started"
+	EventQueued  EventType = "queued"
+	EventStarted EventType = "started"
+	// EventStopping: a stop was requested for a running job; it is still running until its runner returns.
+	EventStopping EventType = "stopping"
 	EventOutput   EventType = "output"
 	EventFinished EventType = "finished"
 )
@@ -100,8 +113,11 @@ type Event struct {
 }
 
 type running struct {
-	job    job.Job
-	cancel context.CancelCauseFunc
+	job      job.Job
+	cancel   context.CancelCauseFunc
+	rep      runner.Reporter // set by execute, before the job is visible to Abort
+	stopping bool
+	reason   string
 }
 
 // Manager is the queue.
@@ -120,6 +136,8 @@ type Manager struct {
 	pending  []job.Job
 	running  map[job.ID]*running
 	busy     map[string]job.ID
+	draining bool
+	wake     chan struct{} // closed, and replaced, whenever the counts change
 }
 
 // New validates the configuration and the dependencies.
@@ -152,7 +170,7 @@ func New(cfg Config, d Deps) (*Manager, error) {
 	if d.Log == nil {
 		d.Log = slog.Default()
 	}
-	return &Manager{cfg: cfg, d: d, log: d.Log, running: map[job.ID]*running{}, busy: map[string]job.ID{}}, nil
+	return &Manager{cfg: cfg, d: d, log: d.Log, running: map[job.ID]*running{}, busy: map[string]job.ID{}, wake: make(chan struct{})}, nil
 }
 
 // Start recovers the state left by a previous run and begins dispatching. Jobs that were running
@@ -197,7 +215,7 @@ func (m *Manager) Shutdown(ctx context.Context) error {
 	stop := m.rootStop
 	m.mu.Unlock()
 	if stop != nil {
-		stop(errShutdown)
+		stop(&StopCause{Reason: "dymploy was stopped"})
 	}
 	done := make(chan struct{})
 	go func() { m.wg.Wait(); close(done) }()
@@ -219,6 +237,9 @@ func (m *Manager) Submit(ctx context.Context, r Request) (job.Job, error) {
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.draining {
+		return job.Job{}, ErrDraining
+	}
 	if !m.open {
 		return job.Job{}, ErrClosed
 	}
@@ -245,7 +266,7 @@ func (m *Manager) Submit(ctx context.Context, r Request) (job.Job, error) {
 	if superseded >= 0 {
 		old := m.pending[superseded]
 		m.pending = append(m.pending[:superseded], m.pending[superseded+1:]...)
-		m.finishWaiting(ctx, old, job.Canceled, fmt.Sprintf("superseded by %s", j.ID))
+		m.finishWaiting(ctx, old, job.Aborted, fmt.Sprintf("superseded by %s", j.ID))
 	}
 	m.pending = append(m.pending, j)
 	m.publish(Event{Type: EventQueued, Job: j})
@@ -253,19 +274,26 @@ func (m *Manager) Submit(ctx context.Context, r Request) (job.Job, error) {
 	return j, nil
 }
 
-// Cancel stops a job: a waiting one never runs; a running one gets its context cancelled and the
-// runner is expected to stop it.
-func (m *Manager) Cancel(ctx context.Context, id job.ID) error {
+// Abort asks a job to stop and records why. A waiting job never runs. A running one is told to stop
+// through its context: the runner stops the processes it started, releases what it holds and returns,
+// and only then is the job marked aborted, with the reason. Abort does not wait for that. Asking
+// twice is harmless (the first reason stays).
+func (m *Manager) Abort(ctx context.Context, id job.ID, reason string) error {
+	if reason == "" {
+		reason = "stop requested"
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if r, ok := m.running[id]; ok {
-		r.cancel(errCanceledByUser)
+		m.requestStop(r, reason)
 		return nil
 	}
 	for i, j := range m.pending {
 		if j.ID == id {
 			m.pending = append(m.pending[:i], m.pending[i+1:]...)
-			m.finishWaiting(ctx, j, job.Canceled, "canceled before it started")
+			j.StopRequestedAt, j.StopReason = m.d.Now(), reason
+			m.finishWaiting(ctx, j, job.Aborted, "")
+			m.notify()
 			return nil
 		}
 	}
@@ -277,6 +305,104 @@ func (m *Manager) Cancel(ctx context.Context, id job.ID) error {
 		return ErrFinished
 	}
 	return fmt.Errorf("job %s is %s but not known to the queue", id, j.State)
+}
+
+// requestStop records the request, tells the story and cancels the job's context. Callers hold m.mu.
+func (m *Manager) requestStop(r *running, reason string) {
+	if r.stopping {
+		return
+	}
+	r.stopping, r.reason = true, reason
+	r.job.StopRequestedAt, r.job.StopReason = m.d.Now(), reason
+	if err := m.d.Store.Put(context.Background(), r.job); err != nil {
+		m.log.Error("could not record the stop request", "job", r.job.ID, "error", err)
+	}
+	if r.rep != nil {
+		r.rep.System("stop requested: " + reason + "; stopping what is running")
+	}
+	m.log.Info("job stop requested", "job", r.job.ID, "name", r.job.Name, "reason", reason)
+	m.publish(Event{Type: EventStopping, Job: r.job})
+	r.cancel(&StopCause{Reason: reason})
+	if grace := m.cfg.StopGrace; grace > 0 {
+		id := r.job.ID
+		time.AfterFunc(grace, func() {
+			m.mu.Lock()
+			still := m.running[id] != nil
+			m.mu.Unlock()
+			if still {
+				m.log.Warn("a job is taking longer than expected to stop", "job", id, "grace", grace)
+			}
+		})
+	}
+}
+
+// Halt makes the queue stop for good: no new jobs are accepted, no waiting job is started (they stay
+// queued for the next run) and every running job is asked to stop. Use WaitStopped to know when
+// they have.
+func (m *Manager) Halt(reason string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.open = false
+	for _, r := range m.running {
+		m.requestStop(r, reason)
+	}
+	m.notify()
+}
+
+// Drain makes the queue refuse new jobs while it carries on with the ones it has; WaitIdle says when
+// there are none left. Draining is not undone.
+func (m *Manager) Drain() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.draining = true
+	m.notify()
+}
+
+// Stats is a snapshot of the queue.
+type Stats struct {
+	Queued, Running int
+	Draining        bool
+	Open            bool
+}
+
+// Stats returns how much work there is.
+func (m *Manager) Stats() Stats {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return Stats{Queued: len(m.pending), Running: len(m.running), Draining: m.draining, Open: m.open}
+}
+
+// WaitIdle blocks until nothing is waiting or running, or ctx ends.
+func (m *Manager) WaitIdle(ctx context.Context) error {
+	return m.waitUntil(ctx, func() bool { return len(m.pending) == 0 && len(m.running) == 0 })
+}
+
+// WaitStopped blocks until nothing is running (what is waiting stays queued), or ctx ends.
+func (m *Manager) WaitStopped(ctx context.Context) error {
+	return m.waitUntil(ctx, func() bool { return len(m.running) == 0 })
+}
+
+func (m *Manager) waitUntil(ctx context.Context, cond func() bool) error {
+	for {
+		m.mu.Lock()
+		if cond() {
+			m.mu.Unlock()
+			return nil
+		}
+		wake := m.wake
+		m.mu.Unlock()
+		select {
+		case <-wake:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+}
+
+// notify wakes everybody waiting for the counts to change. Callers hold m.mu.
+func (m *Manager) notify() {
+	close(m.wake)
+	m.wake = make(chan struct{})
 }
 
 // Retry submits a copy of a finished job.
@@ -307,7 +433,7 @@ func (m *Manager) Logs(id job.ID, after int64, limit int) ([]job.Entry, error) {
 // Prune deletes finished jobs and their logs: those older than maxAge (0 = no age limit) and those
 // beyond the keep newest finished ones (0 = no count limit). Unfinished jobs are never touched.
 func (m *Manager) Prune(ctx context.Context, maxAge time.Duration, keep int) (int, error) {
-	all, err := m.d.Store.List(ctx, job.Filter{States: []job.State{job.Succeeded, job.Failed, job.Canceled, job.Interrupted}})
+	all, err := m.d.Store.List(ctx, job.Filter{States: []job.State{job.Succeeded, job.Failed, job.Aborted, job.Interrupted}})
 	if err != nil {
 		return 0, err
 	}
@@ -383,7 +509,14 @@ func (m *Manager) begin(j job.Job) {
 
 // finishWaiting ends a job that never ran.
 func (m *Manager) finishWaiting(ctx context.Context, j job.Job, state job.State, why string) {
-	j.State, j.FinishedAt, j.Error = state, m.d.Now(), why
+	j.State, j.FinishedAt = state, m.d.Now()
+	if why != "" {
+		if state == job.Aborted {
+			j.StopRequestedAt, j.StopReason = j.FinishedAt, why
+		} else {
+			j.Error = why
+		}
+	}
 	if err := m.d.Store.Put(ctx, j); err != nil {
 		m.log.Error("could not record the end of a waiting job", "job", j.ID, "error", err)
 	}
@@ -407,27 +540,33 @@ func (m *Manager) execute(ctx context.Context, r *running) {
 		}
 		m.publish(Event{Type: EventOutput, Job: j, Entry: &e})
 	})
+	m.mu.Lock()
+	r.rep = rep // from now on a stop request can narrate itself in the log
+	m.mu.Unlock()
 	rep.System("job started")
 
 	res, runErr := m.run(ctx, j, rep)
-	rep.Close()
 
-	final := j
+	m.mu.Lock()
+	final := r.job // it carries the stop request, if there was one
+	m.mu.Unlock()
 	final.FinishedAt = m.d.Now()
-	cause := context.Cause(ctx)
+	var stop *StopCause
+	errors.As(context.Cause(ctx), &stop)
 	switch {
 	case runErr == nil && res.ExitCode == 0:
 		final.State = job.Succeeded
 		code := 0
 		final.ExitCode = &code
-	case errors.Is(cause, errCanceledByUser):
-		final.State = job.Canceled
+	case stop != nil:
+		final.State = job.Aborted
+		if final.StopReason == "" { // the whole daemon was told to stop
+			final.StopRequestedAt, final.StopReason = final.FinishedAt, stop.Reason
+		}
 		if runErr == nil {
 			code := res.ExitCode
 			final.ExitCode = &code
 		}
-	case errors.Is(cause, errShutdown):
-		final.State, final.Error = job.Interrupted, "the daemon stopped while the job was running"
 	case runErr != nil:
 		final.State, final.Error = job.Failed, runErr.Error()
 	default:
@@ -436,6 +575,7 @@ func (m *Manager) execute(ctx context.Context, r *running) {
 		final.ExitCode = &code
 	}
 	rep.System(finishLine(final))
+	rep.Close()
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -448,6 +588,7 @@ func (m *Manager) execute(ctx context.Context, r *running) {
 	m.log.Info("job finished", "job", j.ID, "name", j.Name, "state", final.State, "error", final.Error)
 	m.publish(Event{Type: EventFinished, Job: final})
 	m.dispatch()
+	m.notify()
 }
 
 // run calls the runner, turning a panic into an error so one bad runner cannot take the daemon down.
@@ -468,8 +609,8 @@ func finishLine(j job.Job) string {
 	switch j.State {
 	case job.Succeeded:
 		return "job finished: succeeded (exit code 0)"
-	case job.Canceled:
-		return "job finished: canceled"
+	case job.Aborted:
+		return "job finished: aborted (" + j.StopReason + ")"
 	case job.Interrupted:
 		return "job finished: interrupted (" + j.Error + ")"
 	}

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -27,6 +28,7 @@ type fakeJobs struct {
 	subs    map[int]chan Event
 	next    int
 	cancels []job.ID
+	reasons []string
 }
 
 func newFake() *fakeJobs {
@@ -104,7 +106,7 @@ func (f *fakeJobs) Logs(id job.ID, after int64, limit int) ([]job.Entry, error) 
 	return out, nil
 }
 
-func (f *fakeJobs) Cancel(_ context.Context, id job.ID) error {
+func (f *fakeJobs) Abort(_ context.Context, id job.ID, reason string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	j, ok := f.jobs[id]
@@ -115,6 +117,7 @@ func (f *fakeJobs) Cancel(_ context.Context, id job.ID) error {
 		return fmt.Errorf("%w: the job has already finished", ErrConflict)
 	}
 	f.cancels = append(f.cancels, id)
+	f.reasons = append(f.reasons, reason)
 	return nil
 }
 
@@ -246,18 +249,18 @@ func TestBadQueriesAreRefused(t *testing.T) {
 	}
 }
 
-func TestCancelAndRetry(t *testing.T) {
+func TestAbortAndRetry(t *testing.T) {
 	f, c := withJobs(t)
 	f.add(job.Job{ID: "run", Name: "n", State: job.Running})
 	f.add(job.Job{ID: "done", Name: "n", State: job.Failed, Input: json.RawMessage(`{"a":1}`)})
 	ctx := context.Background()
-	if msg, err := c.Cancel(ctx, "run"); err != nil || !strings.Contains(msg, "run") || len(f.cancels) != 1 {
+	if msg, err := c.Abort(ctx, "run", "because I said so"); err != nil || !strings.Contains(msg, "run") || len(f.cancels) != 1 || f.reasons[0] != "because I said so" {
 		t.Fatalf("%q %v", msg, err)
 	}
-	if _, err := c.Cancel(ctx, "done"); err == nil || !strings.Contains(err.Error(), "already finished") {
+	if _, err := c.Abort(ctx, "done", ""); err == nil || !strings.Contains(err.Error(), "already finished") {
 		t.Fatalf("a conflict is explained, without the sentinel's own words: %v", err)
 	}
-	if _, err := c.Cancel(ctx, "ghost"); err == nil || !strings.Contains(err.Error(), "not found") {
+	if _, err := c.Abort(ctx, "ghost", ""); err == nil || !strings.Contains(err.Error(), "not found") {
 		t.Fatalf("%v", err)
 	}
 	n, err := c.Retry(ctx, "done")
@@ -472,7 +475,7 @@ func TestReadOnlyAPIHasNoWriteEndpoints(t *testing.T) {
 	f.add(job.Job{ID: "run", State: job.Running})
 	srv := httptest.NewServer((&API{Jobs: f, ReadOnly: true}).Handler())
 	defer srv.Close()
-	resp, err := http.Post(srv.URL+"/v1/jobs/run/cancel", "", nil)
+	resp, err := http.Post(srv.URL+"/v1/jobs/run/abort", "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -596,5 +599,97 @@ func TestTheQueueEndpointsStatusCodesAndInput(t *testing.T) {
 	resp.Body.Close()
 	if resp.StatusCode == 202 {
 		t.Fatal("the public API cannot start jobs")
+	}
+}
+
+func TestTheReasonOfAnAbortTravelsAndHasADefault(t *testing.T) {
+	f := newFake()
+	f.add(job.Job{ID: "run", State: job.Running})
+	srv := httptest.NewServer((&API{Jobs: f}).Handler())
+	defer srv.Close()
+	post := func(body string) int {
+		resp, err := http.Post(srv.URL+"/v1/jobs/run/abort", "application/json", strings.NewReader(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		return resp.StatusCode
+	}
+	if post("") != 202 || f.reasons[0] != "stop requested through the control socket" {
+		t.Fatalf("no body, default reason: %v", f.reasons)
+	}
+	if post(`{"reason":"  the target is going away  "}`) != 202 || f.reasons[1] != "the target is going away" {
+		t.Fatalf("%v", f.reasons)
+	}
+	for body, want := range map[string]int{`not json`: 400, `{"reason":"x","y":1}`: 400, `{"reason":"` + strings.Repeat("a", 600) + `"}`: 400} {
+		if got := post(body); got != want {
+			t.Errorf("%.40s → %d", body, got)
+		}
+	}
+	if len(f.reasons) != 2 {
+		t.Fatalf("refused requests stop nothing: %v", f.reasons)
+	}
+}
+
+func TestStopOverTheSocket(t *testing.T) {
+	var got []string
+	p := sockPath(t)
+	stop := startWith(t, p, Handlers{Status: fixed, Stop: func(graceful bool, reason string) (string, error) {
+		got = append(got, fmt.Sprintf("%v/%s", graceful, reason))
+		if reason == "refuse" {
+			return "", errors.New("already stopping")
+		}
+		return "draining", nil
+	}})
+	defer stop()
+	c := &Client{Socket: p}
+	if msg, err := c.Stop(context.Background(), true, "deploy window"); err != nil || msg != "draining" {
+		t.Fatalf("%q %v", msg, err)
+	}
+	if _, err := c.Stop(context.Background(), false, "refuse"); err == nil || !strings.Contains(err.Error(), "already stopping") {
+		t.Fatalf("%v", err)
+	}
+	if strings.Join(got, "|") != "true/deploy window|false/refuse" {
+		t.Fatalf("%v", got)
+	}
+}
+
+func TestStopWhenTheDaemonCannotBeStopped(t *testing.T) {
+	p := sockPath(t)
+	stop := start(t, p, fixed)
+	defer stop()
+	if _, err := (&Client{Socket: p}).Stop(context.Background(), false, ""); !errors.Is(err, ErrNoStop) {
+		t.Fatalf("%v", err)
+	}
+	resp, err := (&http.Client{Transport: &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+		return (&net.Dialer{}).DialContext(ctx, "unix", p)
+	}}}).Post("http://x/v1/stop", "application/json", strings.NewReader("garbage"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode == 202 {
+		t.Fatal("garbage must not stop anything")
+	}
+}
+
+func TestLiveChannelsEndWhenTheDaemonStartsToStop(t *testing.T) {
+	f := newFake()
+	closing := make(chan struct{})
+	srv := httptest.NewServer((&API{Jobs: f, Closing: closing}).Handler())
+	defer srv.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	c, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(srv.URL, "http")+"/v1/events", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.CloseNow()
+	if _, _, err := c.Read(ctx); err != nil { // snapshot
+		t.Fatal(err)
+	}
+	close(closing)
+	if _, _, err := c.Read(ctx); websocket.CloseStatus(err) != websocket.StatusGoingAway {
+		t.Fatalf("watchers are told the daemon is going away: %v", err)
 	}
 }

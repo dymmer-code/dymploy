@@ -143,11 +143,11 @@ repo_keep_days: 14
 
 Accepted events become jobs. A job is named after its repository (`github/owner/repo`): jobs with the
 same name never run at the same time, and at most `queue.max_concurrent` run at once. Each job has a
-state (`queued`, `running`, `succeeded`, `failed`, `canceled`, `interrupted`), a history and a log
+state (`queued`, `running`, `succeeded`, `failed`, `aborted`, `interrupted`), a history and a log
 (`<data_dir>/logs/<job>.jsonl`, one line per entry, written as it happens, capped at
-`queue.log_max_bytes`). State lives in `<data_dir>/state/jobs.db`; only one daemon may own it. Jobs that
-were running when the daemon stopped are marked `interrupted` (never repeated blindly); jobs that were
-waiting resume in order.
+`queue.log_max_bytes`). State lives in `<data_dir>/state/jobs.db`; only one daemon may own it. A job that was
+stopped on purpose is `aborted` and says why (`stop_reason`); one that was running when dymploy *died* (a crash, a power cut)
+is found at the next start and marked `interrupted`, never repeated blindly; jobs that were waiting resume in order.
 
 ```yaml
 queue:
@@ -247,7 +247,7 @@ The same binary talks to the running daemon through the control socket (`--socke
 dymploy jobs [--state running,queued] [--name github/owner/repo] [--limit 20] [--json]
 dymploy job <id>                 # state, exit code, error, timings
 dymploy logs <id> [-f]           # -f follows until the job ends (lines: "#" dymploy, "!" stderr)
-dymploy cancel <id>              # a waiting job never runs; a running one is stopped
+dymploy abort <id> [--reason "…"]   # stop a job properly (see Stopping): it ends up `aborted`, with the reason
 dymploy retry <id>               # a finished job again, as a new job
 dymploy watch [--json]           # everything, live: what is waiting or running, then every change and log line
 dymploy queue github/owner/repo --ref main [-f]   # start a job by hand (a branch or a tag); -f follows its log
@@ -260,8 +260,8 @@ to it at once), and the job obeys the queue's rules (`on_busy`, one job per repo
 the control socket, never through the public API, and is written to the audit log. For GitHub it needs the App
 (`app_id`/`private_key_file`) installed on the repository.
 
-The API behind those commands is `GET /v1/jobs`, `/v1/jobs/{id}`, `/v1/jobs/{id}/logs?after=&limit=`, `POST /v1/jobs/{id}/cancel`
-and `/retry`, and the live channel `GET /v1/events` (a WebSocket). The channel starts with a `snapshot` of the jobs waiting or
+The API behind those commands is `GET /v1/jobs`, `/v1/jobs/{id}`, `/v1/jobs/{id}/logs?after=&limit=`, `POST /v1/jobs/{id}/abort`
+(body `{"reason": "…"}`) and `/retry`, and the live channel `GET /v1/events` (a WebSocket). The channel starts with a `snapshot` of the jobs waiting or
 running and then sends `queued`, `started`, `output` and `finished` messages as JSON. With `?job=<id>&after=<seq>` it first
 replays that job's log from the sequence number and follows the job until it finishes, so a client that reconnects loses
 nothing: every log line carries its `seq`, and a gap means the client was too slow and can read the log again. The
@@ -271,6 +271,32 @@ Other tools can use the **read-only** part on the public listener, under `/api/v
 (`Authorization: Bearer <token>`; see `examples/config/`). Without the token file nothing is mounted. Cancelling and retrying
 stay on the control socket. Run it behind the reverse proxy over TLS; `api.allowed_origins` lists the web origins allowed to
 open the channel from a browser.
+
+## Stopping, without a mess
+
+Nothing is stopped by cutting it off. Stopping a **job** and stopping **dymploy** are different commands on purpose, so a
+forgotten argument never stops the wrong thing.
+
+**A job** (`dymploy abort <id> --reason "…"`): a job that has not started never runs. A running one is *asked* to stop: its
+runner stops the processes it started (a build container gets SIGTERM and, after `queue.stop_grace`-ish time, SIGKILL; a deploy
+command over SSH gets TERM, then KILL), releases what it holds, and only then is the job marked `aborted`. The reason, who asked
+and when are written down (`stop_reason`, `stop_requested_at`), the job's log narrates it ("stop requested: …", what the process
+printed while cleaning up, "job finished: aborted (…)") and watchers see a `stopping` event before the end. Asking twice is harmless.
+
+**dymploy** (`dymploy stop [--graceful]`, which waits and shows the progress until the daemon is gone; `--no-wait`, `--timeout`):
+
+- `--graceful`: new jobs are refused (webhooks, `dymploy queue` and `retry` get an error that says dymploy is shutting down —
+  a webhook gets `503` with `Retry-After`, and the sender's retry is not taken for a duplicate), while **every job, running or
+  waiting, runs to the end**; the rest of the API keeps answering so the drain can be watched (`dymploy status` shows
+  `draining`). When nothing is left, the daemon goes away.
+- without it: everything incoming on the public listener is refused (`503`), every running job is aborted as above with the
+  reason, and when all are clean the daemon goes away. Jobs that were still waiting stay `queued` and resume at the next start.
+  Stopping while it drains turns the drain into this. If jobs do not stop within `shutdown_timeout` (default 2m) the daemon
+  logs it and leaves anyway.
+- Signals do the same: SIGTERM and SIGINT stop (a second one leaves at once), SIGQUIT stops gracefully.
+
+A **reload** that takes a repository out of the policy does not just stop accepting it: what that repository still has waiting
+or running is stopped the same proper way, with the reason "no longer allowed by the configuration after a reload".
 
 ## Development
 

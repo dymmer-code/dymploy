@@ -375,13 +375,11 @@ func (b *build) step(ctx context.Context, i int, s manifest.Step, image string, 
 	if err != nil {
 		return 0, err
 	}
-	// Whatever happens, the container is stopped and removed, also when ctx is already over.
+	// Whatever happens, the container ends up stopped and removed, also when ctx is already over.
 	defer func() {
 		cctx, c := context.WithTimeout(context.Background(), b.r.cfg.StopGrace+30*time.Second)
 		defer c()
-		if err := eng.Stop(cctx, id, b.r.cfg.StopGrace); err != nil {
-			log.System("could not stop the container (it may have already exited): " + err.Error())
-		}
+		_ = eng.Stop(cctx, id, b.r.cfg.StopGrace) // a no-op when it already ended
 		if err := eng.Remove(cctx, id); err != nil {
 			log.System("could not remove the container: " + err.Error())
 		}
@@ -389,5 +387,38 @@ func (b *build) step(ctx context.Context, i int, s manifest.Step, image string, 
 	if err := eng.Start(ctx, id); err != nil {
 		return 0, err
 	}
-	return eng.Follow(ctx, id, b.t.Log.Stdout(), b.t.Log.Stderr())
+
+	// A stop is a request: when ctx ends the container is asked to stop (SIGTERM, then SIGKILL after the
+	// grace period) and its output keeps being followed until it exits, so whatever it says while
+	// cleaning up reaches the log. Following is therefore not tied to ctx.
+	fctx, fcancel := context.WithCancel(context.Background())
+	defer fcancel()
+	ended := make(chan struct{})
+	stopper := make(chan struct{})
+	go func() {
+		defer close(stopper)
+		select {
+		case <-ended:
+		case <-ctx.Done():
+			log.System(fmt.Sprintf("stopping the container: it gets %s to end before it is killed", b.r.cfg.StopGrace))
+			cctx, c := context.WithTimeout(context.Background(), b.r.cfg.StopGrace+30*time.Second)
+			defer c()
+			if err := eng.Stop(cctx, id, b.r.cfg.StopGrace); err != nil {
+				log.System("could not stop the container: " + err.Error())
+			}
+			// If it still has not ended, stop following: the deferred removal forces the issue.
+			select {
+			case <-ended:
+			case <-time.After(b.r.cfg.StopGrace + 10*time.Second):
+				fcancel()
+			}
+		}
+	}()
+	code, err := eng.Follow(fctx, id, b.t.Log.Stdout(), b.t.Log.Stderr())
+	close(ended)
+	<-stopper // it may still be writing to the log: wait before the job's reporter is closed
+	if ctx.Err() != nil {
+		return 0, ctx.Err() // however it ended, the work was interrupted
+	}
+	return code, err
 }

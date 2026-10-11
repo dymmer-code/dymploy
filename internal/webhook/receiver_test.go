@@ -282,3 +282,16 @@ func TestAllowedAnswersWithTheCurrentPolicy(t *testing.T) {
 		t.Fatal("the replaced policy applies to manual jobs too")
 	}
 }
+
+func TestAShuttingDownQueueIs503WithAMessageAndTheRetryIsAccepted(t *testing.T) {
+	f := newFixture(t)
+	f.q.err = ErrShuttingDown
+	w := f.postFake(fakeBody("d-stop", "refs/heads/main"))
+	if w.Code != 503 || !strings.Contains(w.Body.String(), "shutting down") || w.Header().Get("Retry-After") == "" {
+		t.Fatalf("%d %s %v", w.Code, w.Body, w.Header())
+	}
+	f.q.err = nil
+	if w := f.postFake(fakeBody("d-stop", "refs/heads/main")); w.Code != 202 {
+		t.Fatalf("the same delivery, once dymploy is back, is not a duplicate: %d", w.Code)
+	}
+}

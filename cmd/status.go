@@ -34,6 +34,9 @@ func newStatusCmd(_ string) *cobra.Command {
 			}
 			fmt.Fprintf(out, "dymploy %s\n  pid     %d\n  started %s (up %s)\n",
 				st.Version, st.PID, st.StartedAt.Format(time.RFC3339), time.Since(st.StartedAt).Round(time.Second))
+			if st.State != "" {
+				fmt.Fprintf(out, "  state   %s (%s, %s)\n", st.State, plural(st.Running, "running job"), plural(st.Queued, "waiting job"))
+			}
 			return nil
 		},
 	}

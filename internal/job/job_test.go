@@ -131,7 +131,7 @@ func TestFilesArePrivate(t *testing.T) {
 }
 
 func TestStateFinality(t *testing.T) {
-	for s, want := range map[job.State]bool{job.Queued: false, job.Running: false, job.Succeeded: true, job.Failed: true, job.Canceled: true, job.Interrupted: true} {
+	for s, want := range map[job.State]bool{job.Queued: false, job.Running: false, job.Succeeded: true, job.Failed: true, job.Aborted: true, job.Interrupted: true} {
 		if s.Final() != want {
 			t.Errorf("%s: Final() = %v", s, !want)
 		}

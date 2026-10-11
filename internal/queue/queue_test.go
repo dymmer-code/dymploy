@@ -315,8 +315,8 @@ func TestCoalesceReplacesTheWaitingJob(t *testing.T) {
 	e.waitStarted(t)
 	old := e.submit(t, "repo")
 	newest := e.submit(t, "repo")
-	sup := e.waitState(t, old.ID, job.Canceled)
-	if !strings.Contains(sup.Error, string(newest.ID)) || !strings.Contains(sup.Error, "superseded") {
+	sup := e.waitState(t, old.ID, job.Aborted)
+	if !strings.Contains(sup.StopReason, string(newest.ID)) || !strings.Contains(sup.StopReason, "superseded") {
 		t.Fatalf("a replaced job says by whom: %+v", sup)
 	}
 	gate.Open()
@@ -351,7 +351,7 @@ func TestUnknownPolicyIsRefused(t *testing.T) {
 
 // --- control ---
 
-func TestCancelQueuedAndRunning(t *testing.T) {
+func TestAbortQueuedAndRunning(t *testing.T) {
 	gate := runnertest.NewGate()
 	e := newEnv(t, Config{MaxConcurrent: 1}, runnertest.Hold(gate, 0))
 	e.start(t)
@@ -359,36 +359,107 @@ func TestCancelQueuedAndRunning(t *testing.T) {
 	e.waitStarted(t)
 	queued := e.submit(t, "b")
 
-	if err := e.m.Cancel(context.Background(), queued.ID); err != nil {
+	if err := e.m.Abort(context.Background(), queued.ID, "not needed any more"); err != nil {
 		t.Fatal(err)
 	}
-	e.waitState(t, queued.ID, job.Canceled)
+	q := e.waitState(t, queued.ID, job.Aborted)
+	if q.StopReason != "not needed any more" || q.StopRequestedAt.IsZero() || q.FinishedAt.IsZero() {
+		t.Fatalf("a job that never ran records why it was stopped: %+v", q)
+	}
 
-	if err := e.m.Cancel(context.Background(), running.ID); err != nil {
+	if err := e.m.Abort(context.Background(), running.ID, "the deploy target is being replaced"); err != nil {
 		t.Fatal(err)
 	}
-	j := e.waitState(t, running.ID, job.Canceled)
-	if j.FinishedAt.IsZero() {
-		t.Fatal("a cancelled job has an end time")
+	j := e.waitState(t, running.ID, job.Aborted)
+	if j.FinishedAt.IsZero() || j.StopReason != "the deploy target is being replaced" || j.StopRequestedAt.IsZero() {
+		t.Fatalf("an aborted job has its end time and the reason: %+v", j)
 	}
 	got, _ := e.m.Logs(running.ID, 0, 0)
-	if !strings.Contains(strings.Join(lines(got), "|"), "canceled") {
-		t.Fatalf("%v", lines(got))
+	story := strings.Join(lines(got), "|")
+	for _, want := range []string{"stop requested: the deploy target is being replaced", "job finished: aborted (the deploy target is being replaced)"} {
+		if !strings.Contains(story, want) {
+			t.Fatalf("the log tells it: want %q in %s", want, story)
+		}
 	}
 	if len(e.fake.Calls()) != 1 {
-		t.Fatal("the queued job that was cancelled must never run")
+		t.Fatal("the queued job that was aborted must never run")
 	}
 }
 
-func TestCancelErrors(t *testing.T) {
+func TestAStopIsARequestThatTheRunnerFulfilsAndTheJobSaysSoWhileItStops(t *testing.T) {
+	// a runner that needs a moment to clean up after being told to stop
+	released := make(chan struct{})
+	cleaning := make(chan struct{})
+	e := newEnv(t, Config{MaxConcurrent: 1}, func(ctx context.Context, tk runner.Task) (runner.Result, error) {
+		<-ctx.Done()
+		close(cleaning)
+		<-released // stopping its processes takes time
+		return runner.Result{}, ctx.Err()
+	})
+	e.start(t)
+	events, cancel := e.m.Subscribe()
+	defer cancel()
+	j := e.submit(t, "a")
+	e.waitStarted(t)
+
+	if err := e.m.Abort(context.Background(), j.ID, "please stop"); err != nil {
+		t.Fatal(err)
+	}
+	<-cleaning
+	mid, _ := e.m.Get(context.Background(), j.ID)
+	if mid.State != job.Running || mid.StopReason != "please stop" || mid.StopRequestedAt.IsZero() {
+		t.Fatalf("while the runner is stopping the job is still running, with the request recorded: %+v", mid)
+	}
+	if err := e.m.Abort(context.Background(), j.ID, "a second opinion"); err != nil {
+		t.Fatalf("asking twice is harmless: %v", err)
+	}
+	close(released)
+	done := e.waitState(t, j.ID, job.Aborted)
+	if done.StopReason != "please stop" {
+		t.Fatalf("the first reason stays: %+v", done)
+	}
+	var seen []EventType
+	for len(seen) < 4 {
+		select {
+		case ev := <-events:
+			if ev.Type != EventOutput {
+				seen = append(seen, ev.Type)
+			}
+		case <-time.After(3 * time.Second):
+			t.Fatalf("events: %v", seen)
+		}
+	}
+	if seen[0] != EventQueued || seen[1] != EventStarted || seen[2] != EventStopping || seen[3] != EventFinished {
+		t.Fatalf("watchers see the stop request before the end: %v", seen)
+	}
+}
+
+func TestAnAbortedJobWhoseRunnerReportsSomethingElseIsStillAborted(t *testing.T) {
+	gate := runnertest.NewGate()
+	e := newEnv(t, Config{MaxConcurrent: 1}, func(ctx context.Context, tk runner.Task) (runner.Result, error) {
+		<-ctx.Done()
+		return runner.Result{ExitCode: 137}, nil // killed: the work reports an exit code, not an error
+	})
+	_ = gate
+	e.start(t)
+	j := e.submit(t, "a")
+	e.waitStarted(t)
+	e.m.Abort(context.Background(), j.ID, "stop")
+	got := e.waitState(t, j.ID, job.Aborted)
+	if got.ExitCode == nil || *got.ExitCode != 137 {
+		t.Fatalf("the exit code of the stopped work is kept: %+v", got)
+	}
+}
+
+func TestAbortErrors(t *testing.T) {
 	e := newEnv(t, Config{MaxConcurrent: 1}, runnertest.Exit(0))
 	e.start(t)
 	j := e.submit(t, "a")
 	e.waitState(t, j.ID, job.Succeeded)
-	if err := e.m.Cancel(context.Background(), j.ID); !errors.Is(err, ErrFinished) {
+	if err := e.m.Abort(context.Background(), j.ID, "x"); !errors.Is(err, ErrFinished) {
 		t.Fatalf("got %v", err)
 	}
-	if err := e.m.Cancel(context.Background(), "ghost"); !errors.Is(err, job.ErrNotFound) {
+	if err := e.m.Abort(context.Background(), "ghost", "x"); !errors.Is(err, job.ErrNotFound) {
 		t.Fatalf("got %v", err)
 	}
 }
@@ -463,8 +534,8 @@ func TestShutdownInterruptsRunningJobsAndStopsAccepting(t *testing.T) {
 		t.Fatal(err)
 	}
 	got, _ := e.m.Get(context.Background(), j.ID)
-	if got.State != job.Interrupted {
-		t.Fatalf("a shutdown interrupts what is running: %+v", got)
+	if got.State != job.Aborted || got.StopReason != "dymploy was stopped" {
+		t.Fatalf("a shutdown aborts what is running, with the reason: %+v", got)
 	}
 	q, _ := e.m.Get(context.Background(), queued.ID)
 	if q.State != job.Queued {
@@ -762,3 +833,143 @@ func TestPruneLoopRunsUntilCancelled(t *testing.T) {
 		t.Fatal("the loop must stop when its context ends")
 	}
 }
+
+// --- draining and halting ---
+
+func TestDrainRefusesNewJobsAndWaitsForAllTheWorkInHand(t *testing.T) {
+	gate := runnertest.NewGate()
+	e := newEnv(t, Config{MaxConcurrent: 1}, runnertest.Hold(gate, 0))
+	e.start(t)
+	a := e.submit(t, "a")
+	e.waitStarted(t)
+	b := e.submit(t, "b") // waiting
+	e.m.Drain()
+
+	if st := e.m.Stats(); !st.Draining || st.Running != 1 || st.Queued != 1 || !st.Open {
+		t.Fatalf("%+v", st)
+	}
+	if _, err := e.m.Submit(context.Background(), req("c")); !errors.Is(err, ErrDraining) {
+		t.Fatalf("new jobs are refused with a message of their own: %v", err)
+	}
+	if _, err := e.m.Retry(context.Background(), a.ID); err == nil {
+		t.Fatal("a retry is a new job too")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+	defer cancel()
+	if err := e.m.WaitIdle(ctx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("not idle while work remains: %v", err)
+	}
+
+	gate.Open()
+	idle, stop := context.WithTimeout(context.Background(), 5*time.Second)
+	defer stop()
+	if err := e.m.WaitIdle(idle); err != nil {
+		t.Fatalf("idle once everything, queued work included, has run: %v", err)
+	}
+	e.waitState(t, a.ID, job.Succeeded)
+	e.waitState(t, b.ID, job.Succeeded)
+	if st := e.m.Stats(); st.Running != 0 || st.Queued != 0 {
+		t.Fatalf("%+v", st)
+	}
+}
+
+func TestHaltAbortsWhatRunsKeepsWhatWaitsAndAcceptsNothing(t *testing.T) {
+	gate := runnertest.NewGate()
+	e := newEnv(t, Config{MaxConcurrent: 2}, runnertest.Hold(gate, 0))
+	e.start(t)
+	r1, r2 := e.submit(t, "a"), e.submit(t, "b")
+	e.waitStarted(t)
+	e.waitStarted(t)
+	waiting := e.submit(t, "c")
+
+	e.m.Halt("dymploy is stopping")
+	if _, err := e.m.Submit(context.Background(), req("d")); !errors.Is(err, ErrClosed) {
+		t.Fatalf("%v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := e.m.WaitStopped(ctx); err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []job.ID{r1.ID, r2.ID} {
+		got, _ := e.m.Get(context.Background(), id)
+		if got.State != job.Aborted || got.StopReason != "dymploy is stopping" {
+			t.Fatalf("%+v", got)
+		}
+	}
+	w, _ := e.m.Get(context.Background(), waiting.ID)
+	if w.State != job.Queued {
+		t.Fatalf("what was waiting stays queued for the next start, and does not start now: %+v", w)
+	}
+	if len(e.fake.Calls()) != 2 {
+		t.Fatal("no waiting job may start once the queue is halted")
+	}
+}
+
+func TestWaitersHonourTheirContextAndAnEmptyQueueIsIdleAtOnce(t *testing.T) {
+	e := newEnv(t, Config{MaxConcurrent: 1}, runnertest.Exit(0))
+	e.start(t)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := e.m.WaitIdle(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.m.WaitStopped(ctx); err != nil {
+		t.Fatal(err)
+	}
+	cctx, ccancel := context.WithCancel(context.Background())
+	gate := runnertest.NewGate()
+	e2 := newEnv(t, Config{MaxConcurrent: 1}, runnertest.Hold(gate, 0))
+	e2.start(t)
+	e2.submit(t, "a")
+	e2.waitStarted(t)
+	ccancel()
+	if err := e2.m.WaitStopped(cctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("%v", err)
+	}
+	gate.Open()
+}
+
+func TestASlowStopIsComplainedAboutInTheDaemonLog(t *testing.T) {
+	var logs strings.Builder
+	var mu sync.Mutex
+	stuck := make(chan struct{})
+	e := &env{store: job.NewMemStore(), logs: job.NewMemLogs(), fake: runnertest.New(func(ctx context.Context, _ runner.Task) (runner.Result, error) {
+		<-ctx.Done()
+		<-stuck
+		return runner.Result{}, ctx.Err()
+	})}
+	reg := runner.NewRegistry()
+	reg.MustRegister("fake", e.fake)
+	m, err := New(Config{MaxConcurrent: 1, StopGrace: 50 * time.Millisecond}, Deps{
+		Store: e.store, Logs: e.logs, Runners: reg,
+		Log: slog.New(slog.NewTextHandler(writerFunc(func(p []byte) { mu.Lock(); logs.Write(p); mu.Unlock() }), nil)),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.m = m
+	e.start(t)
+	j := e.submit(t, "a")
+	e.waitStarted(t)
+	m.Abort(context.Background(), j.ID, "stop")
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		mu.Lock()
+		got := logs.String()
+		mu.Unlock()
+		if strings.Contains(got, "taking longer than expected to stop") {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("no complaint:\n%s", got)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	close(stuck)
+	e.waitState(t, j.ID, job.Aborted)
+}
+
+type writerFunc func([]byte)
+
+func (f writerFunc) Write(p []byte) (int, error) { f(p); return len(p), nil }

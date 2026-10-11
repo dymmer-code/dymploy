@@ -17,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -129,11 +130,32 @@ func (s *server) session(ch ssh.Channel, reqs <-chan *ssh.Request) {
 		cmd.Dir = s.home
 		cmd.Stdin, cmd.Stdout, cmd.Stderr = ch, ch, ch.Stderr()
 		code := 0
-		if err := cmd.Run(); err != nil {
-			if ee, ok := err.(*exec.ExitError); ok {
-				code = ee.ExitCode()
-			} else {
-				code = 127
+		if err := cmd.Start(); err != nil {
+			code = 127
+		} else {
+			// signals sent by the client reach the command, as OpenSSH does
+			go func() {
+				for r := range reqs {
+					if r.Type != "signal" {
+						r.Reply(false, nil)
+						continue
+					}
+					var sg struct{ Name string }
+					ssh.Unmarshal(r.Payload, &sg)
+					switch sg.Name {
+					case "TERM":
+						cmd.Process.Signal(syscall.SIGTERM)
+					case "KILL":
+						cmd.Process.Signal(syscall.SIGKILL)
+					}
+				}
+			}()
+			if err := cmd.Wait(); err != nil {
+				if ee, ok := err.(*exec.ExitError); ok {
+					code = ee.ExitCode()
+				} else {
+					code = 127
+				}
 			}
 		}
 		status := make([]byte, 4)
@@ -273,6 +295,45 @@ func TestUploadRefusals(t *testing.T) {
 	}
 	if b, _ := os.ReadFile(filepath.Join(r.srv.home, "plain.bin")); string(b) != "ok" {
 		t.Fatalf("%q", b)
+	}
+}
+
+func TestCancellingAsksTheCommandToStopBeforeKillingIt(t *testing.T) {
+	old := termGrace
+	termGrace = 300 * time.Millisecond
+	defer func() { termGrace = old }()
+	r := newRig(t)
+	c := r.dial(t)
+
+	// a command that cleans up when asked: it gets TERM and the time to do it
+	marker := filepath.Join(r.srv.home, "cleaned-up")
+	ctx, cancel := context.WithCancel(context.Background())
+	time.AfterFunc(300*time.Millisecond, cancel)
+	start := time.Now()
+	_, err := c.Run(ctx, "trap 'touch cleaned-up; exit 0' TERM; sleep 30 & wait", nil, io.Discard, io.Discard)
+	if err != context.Canceled {
+		t.Fatalf("%v", err)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if _, err := os.Stat(marker); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the command was not given the chance to clean up")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	// one that ignores TERM is killed after the grace period, not left running
+	ctx2, cancel2 := context.WithCancel(context.Background())
+	time.AfterFunc(200*time.Millisecond, cancel2)
+	start = time.Now()
+	if _, err := c.Run(ctx2, "trap '' TERM; while true; do sleep 1; done", nil, io.Discard, io.Discard); err != context.Canceled {
+		t.Fatalf("%v", err)
+	}
+	if d := time.Since(start); d < 400*time.Millisecond || d > 5*time.Second {
+		t.Fatalf("TERM, a grace period, then KILL: took %s", d)
 	}
 }
 

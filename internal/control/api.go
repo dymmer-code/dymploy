@@ -30,7 +30,9 @@ type Jobs interface {
 	List(ctx context.Context, f job.Filter) ([]job.Job, error)
 	Get(ctx context.Context, id job.ID) (job.Job, error)
 	Logs(id job.ID, after int64, limit int) ([]job.Entry, error)
-	Cancel(ctx context.Context, id job.ID) error
+	// Abort asks a job to stop and records why; it returns once the request is made, not when the
+	// job has stopped.
+	Abort(ctx context.Context, id job.ID, reason string) error
 	Retry(ctx context.Context, id job.ID) (job.Job, error)
 	// Enqueue starts a job by hand: it resolves the reference, applies the same policy as a webhook and
 	// queues the job. ErrInvalid and ErrForbidden say why it could not.
@@ -80,6 +82,8 @@ type API struct {
 	OriginPatterns []string
 	// MaxStreams bounds the live channels open at once; 0 means 16.
 	MaxStreams int
+	// Closing, if set, is closed when the daemon starts to stop: live channels then end cleanly.
+	Closing <-chan struct{}
 
 	streams atomic.Int64
 }
@@ -93,7 +97,7 @@ func (a *API) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/events", a.events)
 	if !a.ReadOnly {
 		mux.HandleFunc("POST /v1/queue", a.enqueue)
-		mux.HandleFunc("POST /v1/jobs/{id}/cancel", a.cancel)
+		mux.HandleFunc("POST /v1/jobs/{id}/abort", a.abort)
 		mux.HandleFunc("POST /v1/jobs/{id}/retry", a.retry)
 	}
 	return mux
@@ -134,7 +138,7 @@ func (a *API) list(w http.ResponseWriter, r *http.Request) {
 		if s = strings.TrimSpace(s); s != "" {
 			state := job.State(s)
 			switch state {
-			case job.Queued, job.Running, job.Succeeded, job.Failed, job.Canceled, job.Interrupted:
+			case job.Queued, job.Running, job.Succeeded, job.Failed, job.Aborted, job.Interrupted:
 				f.States = append(f.States, state)
 			default:
 				reply(w, http.StatusBadRequest, map[string]string{"error": "unknown state " + strconv.Quote(s)})
@@ -213,13 +217,32 @@ func logRange(w http.ResponseWriter, r *http.Request) (after int64, limit int, o
 	return after, limit, true
 }
 
-func (a *API) cancel(w http.ResponseWriter, r *http.Request) {
+func (a *API) abort(w http.ResponseWriter, r *http.Request) {
 	id := job.ID(r.PathValue("id"))
-	if err := a.Jobs.Cancel(r.Context(), id); err != nil {
+	var req struct {
+		Reason string `json:"reason"`
+	}
+	if r.ContentLength != 0 {
+		dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4<<10))
+		dec.DisallowUnknownFields()
+		if err := dec.Decode(&req); err != nil {
+			reply(w, http.StatusBadRequest, map[string]string{"error": "send {\"reason\": \"why\"} or nothing"})
+			return
+		}
+	}
+	reason := strings.TrimSpace(req.Reason)
+	if len(reason) > 500 {
+		reply(w, http.StatusBadRequest, map[string]string{"error": "the reason is too long (500 characters at most)"})
+		return
+	}
+	if reason == "" {
+		reason = "stop requested through the control socket"
+	}
+	if err := a.Jobs.Abort(r.Context(), id, reason); err != nil {
 		fail(w, err)
 		return
 	}
-	reply(w, http.StatusOK, map[string]string{"message": "cancelling " + string(id)})
+	reply(w, http.StatusAccepted, map[string]string{"message": "stop requested for " + string(id)})
 }
 
 func (a *API) enqueue(w http.ResponseWriter, r *http.Request) {
@@ -346,6 +369,9 @@ func (a *API) events(w http.ResponseWriter, r *http.Request) {
 	for {
 		select {
 		case <-ctx.Done():
+			return
+		case <-a.Closing:
+			c.Close(websocket.StatusGoingAway, "dymploy is stopping")
 			return
 		case ev, ok := <-events:
 			if !ok {

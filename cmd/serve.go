@@ -6,12 +6,10 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
-	"os/signal"
 	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -36,6 +34,9 @@ import (
 	"github.com/dymmer-code/dymploy/internal/webhook"
 )
 
+// extraRunners lets tests register runners of their own (for example one that never ends).
+var extraRunners []func(*runner.Registry)
+
 func newServeCmd(version string) *cobra.Command {
 	var configPath string
 	c := &cobra.Command{
@@ -48,8 +49,9 @@ func newServeCmd(version string) *cobra.Command {
 				return err
 			}
 			log := slog.New(slog.NewTextHandler(c.ErrOrStderr(), nil))
-			ctx, stop := signal.NotifyContext(c.Context(), syscall.SIGINT, syscall.SIGTERM)
-			defer stop()
+			// ctx lives as long as the daemon does; the lifecycle decides when that is (see lifecycle).
+			ctx, finish := context.WithCancel(context.Background())
+			defer finish()
 
 			providers, err := buildProviders(cfg)
 			if err != nil {
@@ -82,7 +84,7 @@ func newServeCmd(version string) *cobra.Command {
 			enq := intake.New(mgr, cfg.Runner.Kind, cfg.Runner.ParamsJSON())
 			hooks := buildReceiver(cfg, log, providers, enq)
 			jobs := queueJobs{m: mgr, log: log, providers: providers, hooks: hooks, enq: enq}
-			rl := &reloader{path: configPath, cur: cfg, hooks: hooks, remote: remote, targets: targets, log: log}
+			rl := &reloader{path: configPath, cur: cfg, hooks: hooks, remote: remote, targets: targets, mgr: mgr, log: log}
 			reloadOnSIGHUP(ctx, rl)
 			d := daemon.New(cfg, version).OnReload(rl.Reload).WithJobs(jobs)
 			if err := mountAPI(d, cfg, jobs, log); err != nil {
@@ -91,9 +93,12 @@ func newServeCmd(version string) *cobra.Command {
 			if hooks != nil {
 				d.Handle("/hooks/", hooks.Handler())
 			}
+			lc := &lifecycle{mgr: mgr, d: d, log: log, timeout: cfg.ShutdownTimeout, finish: finish}
+			d.OnStop(lc.Stop).WithStats(func() (int, int) { s := mgr.Stats(); return s.Queued, s.Running })
+			lc.handleSignals(c.Context(), ctx)
 			runErr := d.Run(ctx, nil)
 			stopPrune()
-			if err := shutdownQueue(mgr); err != nil && runErr == nil {
+			if err := shutdownQueue(mgr, cfg.ShutdownTimeout); err != nil && runErr == nil {
 				runErr = err
 			}
 			return runErr
@@ -103,8 +108,8 @@ func newServeCmd(version string) *cobra.Command {
 	return c
 }
 
-func shutdownQueue(mgr *queue.Manager) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+func shutdownQueue(mgr *queue.Manager, timeout time.Duration) error {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	return mgr.Shutdown(ctx)
 }
@@ -115,6 +120,9 @@ func shutdownQueue(mgr *queue.Manager) error {
 func buildQueue(cfg *config.Config, log *slog.Logger, providers map[string]provider.Provider, deployer *deploy.Deployer) (*queue.Manager, *checkout.Manager, func(), error) {
 	runners := runner.NewRegistry()
 	runners.MustRegister(dryrun.Kind, dryrun.New())
+	for _, add := range extraRunners {
+		add(runners)
+	}
 	repos, err := checkout.New(checkout.Config{Root: filepath.Join(cfg.DataDir, "repos")})
 	switch {
 	case err == nil:
@@ -149,6 +157,7 @@ func buildQueue(cfg *config.Config, log *slog.Logger, providers map[string]provi
 	}
 	mgr, err := queue.New(queue.Config{
 		MaxConcurrent: cfg.Queue.MaxConcurrent, MaxPending: cfg.Queue.MaxPending, OnBusy: queue.Policy(cfg.Queue.OnBusy),
+		StopGrace: cfg.Queue.StopGrace,
 	}, queue.Deps{Store: store, Logs: logs, Runners: runners, Log: log})
 	if err != nil {
 		store.Close()
@@ -173,7 +182,7 @@ func mountAPI(d *daemon.Daemon, cfg *config.Config, jobs control.Jobs, log *slog
 	if len(token) < minTokenLength {
 		return fmt.Errorf("api.token_file: the token is too short (%d characters, at least %d): generate one with `openssl rand -hex 32`", len(token), minTokenLength)
 	}
-	api := &control.API{Jobs: jobs, ReadOnly: true, OriginPatterns: cfg.API.AllowedOrigins, MaxStreams: cfg.API.MaxStreams}
+	api := &control.API{Jobs: jobs, ReadOnly: true, OriginPatterns: cfg.API.AllowedOrigins, MaxStreams: cfg.API.MaxStreams, Closing: d.Closing()}
 	d.Handle("/api/", http.StripPrefix("/api", control.RequireToken(token, api.Handler(), func(r *http.Request) {
 		log.Warn("API request refused: missing or wrong token", "remote", r.RemoteAddr, "path", r.URL.Path)
 	})))

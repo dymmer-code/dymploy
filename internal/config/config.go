@@ -11,6 +11,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"time"
 )
 
 // Config is the daemon configuration. Everything that is specific to an installation
@@ -43,6 +44,8 @@ type Config struct {
 	Queue QueueConfig `yaml:"queue"`
 	// Runner is how the jobs started by webhooks are executed.
 	Runner RunnerConfig `yaml:"runner"`
+	// ShutdownTimeout is how long a stop waits for running jobs to stop before the daemon leaves anyway.
+	ShutdownTimeout time.Duration `yaml:"shutdown_timeout"`
 	// RepoKeepDays removes working copies of repositories not used for this many days; 0 keeps them.
 	RepoKeepDays int `yaml:"repo_keep_days"`
 	// ArtifactKeepDays removes the artifacts of builds older than this many days; 0 keeps them.
@@ -60,6 +63,9 @@ type QueueConfig struct {
 	OnBusy string `yaml:"on_busy"`
 	// LogMaxBytes caps the log of each job.
 	LogMaxBytes int64 `yaml:"log_max_bytes"`
+	// StopGrace is how long a job may take to stop after being asked to before the daemon's log
+	// complains about it.
+	StopGrace time.Duration `yaml:"stop_grace"`
 	// KeepJobs and KeepDays bound the history of finished jobs; 0 disables each limit.
 	KeepJobs int `yaml:"keep_jobs"`
 	KeepDays int `yaml:"keep_days"`
@@ -149,9 +155,10 @@ func Default() *Config {
 		WebhookMaxBody:       5 << 20,
 		WebhookRatePerMinute: 600,
 
+		ShutdownTimeout:  2 * time.Minute,
 		RepoKeepDays:     14,
 		ArtifactKeepDays: 14,
-		Queue:            QueueConfig{MaxConcurrent: 2, MaxPending: 1000, OnBusy: "queue", LogMaxBytes: 10 << 20, KeepJobs: 500, KeepDays: 30},
+		Queue:            QueueConfig{StopGrace: 30 * time.Second, MaxConcurrent: 2, MaxPending: 1000, OnBusy: "queue", LogMaxBytes: 10 << 20, KeepJobs: 500, KeepDays: 30},
 		Runner:           RunnerConfig{Kind: "dryrun"},
 	}
 }
@@ -199,6 +206,9 @@ func (c *Config) Validate() error {
 		if !filepath.IsAbs(p) {
 			return fmt.Errorf("%s %q must be an absolute path", name, p)
 		}
+	}
+	if c.ShutdownTimeout < time.Second || c.Queue.StopGrace < 0 {
+		return errors.New("shutdown_timeout must be at least 1s (for example 2m) and queue.stop_grace must not be negative")
 	}
 	if c.RepoKeepDays < 0 || c.ArtifactKeepDays < 0 {
 		return errors.New("repo_keep_days and artifact_keep_days must not be negative")

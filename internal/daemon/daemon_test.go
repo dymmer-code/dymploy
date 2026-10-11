@@ -3,6 +3,8 @@ package daemon
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -140,7 +142,7 @@ func (noJobs) List(context.Context, job.Filter) ([]job.Job, error) {
 }
 func (noJobs) Get(context.Context, job.ID) (job.Job, error)   { return job.Job{}, job.ErrNotFound }
 func (noJobs) Logs(job.ID, int64, int) ([]job.Entry, error)   { return nil, nil }
-func (noJobs) Cancel(context.Context, job.ID) error           { return nil }
+func (noJobs) Abort(context.Context, job.ID, string) error    { return nil }
 func (noJobs) Retry(context.Context, job.ID) (job.Job, error) { return job.Job{}, nil }
 func (noJobs) Enqueue(context.Context, control.EnqueueRequest) (job.Job, error) {
 	return job.Job{}, nil
@@ -256,5 +258,98 @@ func TestTheLiveChannelOutlivesTheServerTimeouts(t *testing.T) {
 	_, data, err := c.Read(rctx)
 	if err != nil || !strings.Contains(string(data), "late") {
 		t.Fatalf("the channel must survive the HTTP timeouts: %v %s", err, data)
+	}
+}
+
+func TestTheModeGatesThePublicListenerAndOnlyMovesForward(t *testing.T) {
+	cfg := testConfig(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	ready := make(chan net.Addr, 1)
+	hooked := 0
+	d := New(cfg, "v").Handle("/hooks/", http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { hooked++; w.WriteHeader(202) })).
+		WithStats(func() (int, int) { return 3, 2 })
+	go func() { done <- d.Run(ctx, func(a net.Addr) { ready <- a }) }()
+	addr := <-ready
+	defer func() { cancel(); <-done }()
+	url := "http://" + addr.String()
+	do := func(method, path string) (int, string) {
+		req, _ := http.NewRequest(method, url+path, nil)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		b, _ := io.ReadAll(resp.Body)
+		return resp.StatusCode, string(b)
+	}
+	status := func() control.Status {
+		st, err := (&control.Client{Socket: cfg.ControlSocket}).Status(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		return st
+	}
+
+	if code, _ := do("POST", "/hooks/github"); code != 202 {
+		t.Fatalf("running: %d", code)
+	}
+	if st := status(); st.State != "running" || st.Queued != 3 || st.Running != 2 {
+		t.Fatalf("%+v", st)
+	}
+
+	d.SetMode(ModeDraining)
+	if code, body := do("POST", "/hooks/github"); code != 503 || !strings.Contains(body, "not accepting new jobs") {
+		t.Fatalf("draining refuses new work with a message: %d %s", code, body)
+	}
+	if code, _ := do("GET", "/healthz"); code != 200 {
+		t.Fatalf("draining keeps answering everything else, so the progress can be watched: %d", code)
+	}
+	if hooked != 1 || status().State != "draining" {
+		t.Fatalf("hooked=%d", hooked)
+	}
+	select {
+	case <-d.Closing():
+		t.Fatal("watchers are not sent away while draining")
+	default:
+	}
+
+	d.SetMode(ModeStopping)
+	for _, req := range [][2]string{{"POST", "/hooks/github"}, {"GET", "/healthz"}, {"GET", "/api/v1/jobs"}} {
+		if code, body := do(req[0], req[1]); code != 503 || !strings.Contains(body, "dymploy is stopping") {
+			t.Fatalf("stopping refuses everything incoming: %v → %d %s", req, code, body)
+		}
+	}
+	if st := status(); st.State != "stopping" {
+		t.Fatalf("the control socket keeps answering: %+v", st)
+	}
+	select {
+	case <-d.Closing():
+	default:
+		t.Fatal("watchers are told to go")
+	}
+	d.SetMode(ModeRunning)
+	d.SetMode(ModeDraining)
+	if d.Mode() != ModeStopping {
+		t.Fatal("the daemon never goes back")
+	}
+	d.SetMode(ModeStopping) // again: harmless
+}
+
+func TestStopAsksTheHandlerSetByTheOwner(t *testing.T) {
+	cfg := testConfig(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	ready := make(chan net.Addr, 1)
+	var got string
+	d := New(cfg, "v").OnStop(func(graceful bool, reason string) (string, error) {
+		got = fmt.Sprintf("%v/%s", graceful, reason)
+		return "ok", nil
+	})
+	go func() { done <- d.Run(ctx, func(a net.Addr) { ready <- a }) }()
+	<-ready
+	defer func() { cancel(); <-done }()
+	if msg, err := (&control.Client{Socket: cfg.ControlSocket}).Stop(context.Background(), true, "why"); err != nil || msg != "ok" || got != "true/why" {
+		t.Fatalf("%q %v %q", msg, err, got)
 	}
 }

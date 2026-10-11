@@ -72,3 +72,12 @@ func TestSubmitReturnsTheJobAndTheQueuesOwnErrors(t *testing.T) {
 		t.Fatalf("callers that start jobs by hand get the queue's errors, not the webhook's: %v", err)
 	}
 }
+
+func TestAStoppingQueueIsTranslatedForTheWebhookLayer(t *testing.T) {
+	for _, err := range []error{queue.ErrDraining, queue.ErrClosed} {
+		s := &submitter{err: err}
+		if got := New(s, "docker", nil).Enqueue(context.Background(), ev); !errors.Is(got, webhook.ErrShuttingDown) {
+			t.Errorf("%v → %v", err, got)
+		}
+	}
+}

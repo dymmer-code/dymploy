@@ -93,6 +93,9 @@ type Gate struct{ ch chan struct{} }
 // NewGate returns a closed gate.
 func NewGate() *Gate { return &Gate{ch: make(chan struct{})} }
 
+// Chan is closed once the gate is open.
+func (g *Gate) Chan() <-chan struct{} { return g.ch }
+
 // Open lets every waiting and future run through. It is safe to call more than once.
 func (g *Gate) Open() {
 	select {

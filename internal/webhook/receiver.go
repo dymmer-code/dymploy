@@ -17,6 +17,10 @@ const DefaultMaxBody = 5 << 20
 // ErrQueueFull is what a queue returns when it cannot take more work right now.
 var ErrQueueFull = errors.New("queue full")
 
+// ErrShuttingDown is what a queue returns when dymploy is stopping and takes no new work. The sender
+// should try again later: the answer is 503 with a message that says why.
+var ErrShuttingDown = errors.New("dymploy is shutting down")
+
 // ErrDropped is what a queue returns when its policy discards the job on purpose. It is not an
 // error for the sender: retrying would be refused again.
 var ErrDropped = errors.New("dropped by the queue policy")
@@ -130,6 +134,11 @@ func (rc *Receiver) serve(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Retry-After", "30")
 		reply(w, http.StatusServiceUnavailable, "busy")
 		log.Warn("webhook not queued", "reason", "queue full")
+	case errors.Is(err, ErrShuttingDown):
+		rc.Dedupe.Release(ev.Provider, ev.DeliveryID)
+		w.Header().Set("Retry-After", "60")
+		reply(w, http.StatusServiceUnavailable, "shutting down: not accepting new jobs")
+		log.Warn("webhook not queued", "reason", "shutting down")
 	case errors.Is(err, ErrDropped):
 		rc.Dedupe.Release(ev.Provider, ev.DeliveryID)
 		reply(w, http.StatusOK, "dropped")
