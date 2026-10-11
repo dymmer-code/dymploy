@@ -157,7 +157,8 @@ func quote(s string) (string, error) {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'", nil
 }
 
-// command builds `env -- NAME='v' … sh -ec '<script>'`.
+// command builds `exec env -- NAME='v' … sh -ec '<script>'`. The exec replaces the login shell, so a signal sent to the
+// session reaches the script's shell even when the login shell would otherwise fork (dash does).
 func command(script string, env map[string]string) (string, error) {
 	names := make([]string, 0, len(env))
 	for k := range env {
@@ -167,7 +168,7 @@ func command(script string, env map[string]string) (string, error) {
 		names = append(names, k)
 	}
 	sort.Strings(names)
-	parts := []string{"env", "--"}
+	parts := []string{"exec", "env", "--"}
 	for _, k := range names {
 		q, err := quote(env[k])
 		if err != nil {

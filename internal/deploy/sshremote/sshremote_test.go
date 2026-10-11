@@ -496,7 +496,7 @@ func TestCommandAndQuote(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := `env -- A='it'\''s' B='2' sh -ec 'echo '\''a b'\'''`
+	want := `exec env -- A='it'\''s' B='2' sh -ec 'echo '\''a b'\'''`
 	if got != want {
 		t.Fatalf("got  %s\nwant %s", got, want)
 	}
