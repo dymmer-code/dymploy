@@ -155,10 +155,15 @@ func buildQueue(cfg *config.Config, log *slog.Logger, providers map[string]provi
 		store.Close()
 		return nil, nil, nil, err
 	}
+	var observer func(queue.Event)
+	if rep := newStatusReporter(cfg, providers, log); rep != nil {
+		observer = rep.Observe
+		log.Info("the state of every run will be shown next to its commit")
+	}
 	mgr, err := queue.New(queue.Config{
 		MaxConcurrent: cfg.Queue.MaxConcurrent, MaxPending: cfg.Queue.MaxPending, OnBusy: queue.Policy(cfg.Queue.OnBusy),
 		StopGrace: cfg.Queue.StopGrace,
-	}, queue.Deps{Store: store, Logs: logs, Runners: runners, Log: log})
+	}, queue.Deps{Store: store, Logs: logs, Runners: runners, Log: log, Observer: observer})
 	if err != nil {
 		store.Close()
 		return nil, nil, nil, err

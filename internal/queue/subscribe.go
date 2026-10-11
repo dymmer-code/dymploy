@@ -35,6 +35,17 @@ func (m *Manager) Subscribe() (<-chan Event, func()) {
 }
 
 func (m *Manager) publish(ev Event) {
+	if m.obs != nil && ev.Type != EventOutput {
+		m.obsMu.Lock()
+		if !m.obsClosed {
+			select {
+			case m.obs <- ev:
+			default:
+				m.log.Warn("the observer is too far behind: an event was dropped", "type", ev.Type, "job", ev.Job.ID)
+			}
+		}
+		m.obsMu.Unlock()
+	}
 	s := &m.subs
 	s.mu.RLock()
 	defer s.mu.RUnlock()

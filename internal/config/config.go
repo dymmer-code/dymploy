@@ -105,6 +105,10 @@ type WebhookConfig struct {
 	// neither). The key file must not be readable by other users.
 	AppID          int64  `yaml:"app_id"`
 	PrivateKeyFile string `yaml:"private_key_file"`
+	// ReportStatus shows the state of every run next to its commit in the provider (on GitHub, the green
+	// tick or the red cross). It needs the App, and the App needs the commit-status permission accepted by
+	// each installation.
+	ReportStatus bool `yaml:"report_status"`
 }
 
 // APIConfig configures the read-only API of the public listener, under /api/v1/.
@@ -237,6 +241,9 @@ func (c *Config) Validate() error {
 		}
 		if w.AppID < 0 || (w.AppID == 0) != (w.PrivateKeyFile == "") {
 			return fmt.Errorf("webhooks.%s: app_id and private_key_file must be given together", name)
+		}
+		if w.ReportStatus && w.AppID == 0 {
+			return fmt.Errorf("webhooks.%s.report_status needs app_id and private_key_file: statuses are published as the App", name)
 		}
 		if w.PrivateKeyFile != "" && !filepath.IsAbs(w.PrivateKeyFile) {
 			return fmt.Errorf("webhooks.%s.private_key_file %q must be an absolute path", name, w.PrivateKeyFile)

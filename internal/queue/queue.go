@@ -48,6 +48,9 @@ type Config struct {
 	StopGrace time.Duration
 }
 
+// observerBuffer is how many events may wait for a slow observer.
+var observerBuffer = 4096
+
 // DefaultMaxPending bounds the waiting list when the configuration does not.
 const DefaultMaxPending = 1000
 
@@ -59,6 +62,11 @@ type Deps struct {
 	Now     func() time.Time
 	NewID   func(time.Time) job.ID
 	Log     *slog.Logger
+	// Observer, if set, is told, in order and from a goroutine of its own, when a job is queued, starts,
+	// is asked to stop and finishes (not about its output). A slow observer never slows the queue down:
+	// events wait in a buffer, and Shutdown lets it catch up before returning. It is meant for things like
+	// reporting the result of a job to the outside.
+	Observer func(Event)
 }
 
 // Errors returned by the Manager.
@@ -138,6 +146,11 @@ type Manager struct {
 	busy     map[string]job.ID
 	draining bool
 	wake     chan struct{} // closed, and replaced, whenever the counts change
+
+	obsMu     sync.Mutex
+	obs       chan Event
+	obsClosed bool
+	obsDone   chan struct{}
 }
 
 // New validates the configuration and the dependencies.
@@ -170,7 +183,17 @@ func New(cfg Config, d Deps) (*Manager, error) {
 	if d.Log == nil {
 		d.Log = slog.Default()
 	}
-	return &Manager{cfg: cfg, d: d, log: d.Log, running: map[job.ID]*running{}, busy: map[string]job.ID{}, wake: make(chan struct{})}, nil
+	m := &Manager{cfg: cfg, d: d, log: d.Log, running: map[job.ID]*running{}, busy: map[string]job.ID{}, wake: make(chan struct{})}
+	if d.Observer != nil {
+		m.obs, m.obsDone = make(chan Event, observerBuffer), make(chan struct{})
+		go func() {
+			defer close(m.obsDone)
+			for ev := range m.obs {
+				d.Observer(ev)
+			}
+		}()
+	}
+	return m, nil
 }
 
 // Start recovers the state left by a previous run and begins dispatching. Jobs that were running
@@ -221,10 +244,24 @@ func (m *Manager) Shutdown(ctx context.Context) error {
 	go func() { m.wg.Wait(); close(done) }()
 	select {
 	case <-done:
-		return nil
 	case <-ctx.Done():
 		return fmt.Errorf("waiting for running jobs to stop: %w", ctx.Err())
 	}
+	// The jobs are over: let the observer finish with what they left behind (the end of each aborted one).
+	if m.obs != nil {
+		m.obsMu.Lock()
+		if !m.obsClosed {
+			m.obsClosed = true
+			close(m.obs)
+		}
+		m.obsMu.Unlock()
+		select {
+		case <-m.obsDone:
+		case <-ctx.Done():
+			return fmt.Errorf("waiting for the observer to catch up: %w", ctx.Err())
+		}
+	}
+	return nil
 }
 
 // Submit accepts a job. The returned job is in state queued.

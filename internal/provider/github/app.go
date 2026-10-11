@@ -101,7 +101,17 @@ func (a *App) jwt() (string, error) {
 // InstallationToken returns a token for the installation that can only read the contents of one
 // repository. Tokens are cached until shortly before they expire.
 func (a *App) InstallationToken(ctx context.Context, installationID int64, repo string) (string, time.Time, error) {
-	key := fmt.Sprintf("%d/%s", installationID, repo)
+	return a.installationToken(ctx, installationID, repo, "contents")
+}
+
+// installationToken asks for a token limited to one repository and to one permission: "contents" is
+// read-only, "statuses" is read-and-write (what publishing a commit status needs, and nothing else).
+func (a *App) installationToken(ctx context.Context, installationID int64, repo, permission string) (string, time.Time, error) {
+	level := "read"
+	if permission == "statuses" {
+		level = "write"
+	}
+	key := fmt.Sprintf("%d/%s/%s", installationID, repo, permission)
 	a.mu.Lock()
 	if c, ok := a.cache[key]; ok && c.expires.Sub(a.Now()) > renewBefore {
 		a.mu.Unlock()
@@ -115,7 +125,7 @@ func (a *App) InstallationToken(ctx context.Context, installationID int64, repo 
 	}
 	payload, _ := json.Marshal(map[string]any{
 		"repositories": []string{repo},
-		"permissions":  map[string]string{"contents": "read"},
+		"permissions":  map[string]string{permission: level},
 	})
 	endpoint := fmt.Sprintf("%s/app/installations/%d/access_tokens", a.APIBase, installationID)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(payload))

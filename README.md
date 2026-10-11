@@ -297,6 +297,16 @@ Other tools can use the **read-only** part on the public listener, under `/api/v
 stay on the control socket. Run it behind the reverse proxy over TLS; `api.allowed_origins` lists the web origins allowed to
 open the channel from a browser.
 
+## Showing the result next to the commit
+
+With `report_status: true` under `webhooks.github` (it needs the App, with the *Commit statuses: Read and write* permission
+accepted by each installation) every run puts its state next to its commit on GitHub: pending while it waits and runs, then the
+green tick (it succeeded), the red cross (a step failed, with its exit code) or an error (it could not be completed or was
+stopped). It appears as the `dymploy` check. What is published leaves dymploy, so it is deliberately generic: no error text, host
+names or stop reasons, only the run number and the exit code. The statuses are sent by the queue's observer, in order and from
+their own goroutine, and a GitHub that does not answer costs a warning in the log, never a job; on shutdown the queue lets the
+observer finish, so the end of an aborted run is reported too.
+
 ## Stopping, without a mess
 
 Nothing is stopped by cutting it off. Stopping a **job** and stopping **dymploy** are different commands on purpose, so a

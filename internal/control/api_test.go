@@ -430,6 +430,16 @@ func TestWatchingAFinishedJobReplaysAndCloses(t *testing.T) {
 			}
 			continue
 		case err := <-w.done:
+			for drained := false; !drained; { // the messages that were already delivered are still to be counted
+				select {
+				case m := <-w.msgs:
+					if m.Type == "output" {
+						n++
+					}
+				default:
+					drained = true
+				}
+			}
 			if err != nil || n != 700 {
 				t.Fatalf("err=%v replayed=%d", err, n)
 			}

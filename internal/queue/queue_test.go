@@ -992,3 +992,126 @@ func TestEveryRunOfANameIsNumbered(t *testing.T) {
 		t.Fatalf("a run is found by its number: %+v", got)
 	}
 }
+
+// --- observer ---
+
+type observed struct {
+	mu  sync.Mutex
+	got []string
+}
+
+func (o *observed) add(ev Event) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.got = append(o.got, string(ev.Type)+":"+string(ev.Job.State))
+}
+
+func (o *observed) list() []string {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return append([]string(nil), o.got...)
+}
+
+func TestAnObserverSeesTheLifeOfAJobInOrderAndNeverItsOutput(t *testing.T) {
+	var o observed
+	e := &env{store: job.NewMemStore(), logs: job.NewMemLogs(), fake: runnertest.New(runnertest.Writes("hello\n", "", 0))}
+	reg := runner.NewRegistry()
+	reg.MustRegister("fake", e.fake)
+	m, err := New(Config{MaxConcurrent: 1}, Deps{Store: e.store, Logs: e.logs, Runners: reg, Observer: o.add,
+		Log: slog.New(slog.NewTextHandler(io.Discard, nil))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.m = m
+	e.start(t)
+	j := e.submit(t, "a")
+	e.waitState(t, j.ID, job.Succeeded)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := m.Shutdown(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(o.list(), " "); got != "queued:queued started:running finished:succeeded" {
+		t.Fatalf("%s", got)
+	}
+}
+
+func TestShutdownLetsTheObserverSeeTheEndOfAbortedJobs(t *testing.T) {
+	var o observed
+	slow := make(chan struct{})
+	gate := runnertest.NewGate()
+	e := &env{store: job.NewMemStore(), logs: job.NewMemLogs(), fake: runnertest.New(runnertest.Hold(gate, 0))}
+	reg := runner.NewRegistry()
+	reg.MustRegister("fake", e.fake)
+	m, err := New(Config{MaxConcurrent: 1}, Deps{Store: e.store, Logs: e.logs, Runners: reg,
+		Observer: func(ev Event) {
+			if ev.Type == EventFinished {
+				<-slow // reporting the end takes a while
+			}
+			o.add(ev)
+		}, Log: slog.New(slog.NewTextHandler(io.Discard, nil))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.m = m
+	e.start(t)
+	j := e.submit(t, "a")
+	e.waitStarted(t)
+	go func() { time.Sleep(200 * time.Millisecond); close(slow) }()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := m.Shutdown(ctx); err != nil {
+		t.Fatal(err)
+	}
+	got := strings.Join(o.list(), " ")
+	if !strings.HasSuffix(got, "finished:aborted") || !strings.Contains(got, string(j.ID)[:0]) {
+		t.Fatalf("Shutdown waits for the observer, so the aborted job's end is reported: %s", got)
+	}
+	if err := m.Shutdown(ctx); err != nil {
+		t.Fatalf("a second Shutdown is harmless: %v", err)
+	}
+}
+
+func TestAnObserverThatNeverCatchesUpDoesNotBlockShutdownForeverAndOverflowIsDropped(t *testing.T) {
+	old := observerBuffer
+	observerBuffer = 6
+	defer func() { observerBuffer = old }()
+	block := make(chan struct{})
+	e := &env{store: job.NewMemStore(), logs: job.NewMemLogs(), fake: runnertest.New(runnertest.Exit(0))}
+	reg := runner.NewRegistry()
+	reg.MustRegister("fake", e.fake)
+	var logs strings.Builder
+	var mu sync.Mutex
+	m, err := New(Config{MaxConcurrent: 1, MaxPending: 10000}, Deps{Store: e.store, Logs: e.logs, Runners: reg,
+		Observer: func(Event) { <-block },
+		Log:      slog.New(slog.NewTextHandler(writerFunc(func(p []byte) { mu.Lock(); logs.Write(p); mu.Unlock() }), nil))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.m = m
+	e.start(t)
+	for i := 0; i < 10; i++ { // more events than the buffer holds
+		if _, err := m.Submit(context.Background(), req(fmt.Sprintf("n%d", i))); err != nil {
+			t.Fatal(err)
+		}
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		mu.Lock()
+		dropped := strings.Contains(logs.String(), "too far behind")
+		mu.Unlock()
+		if dropped {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("overflow must be dropped and logged, not block the queue")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	if err := m.Shutdown(ctx); err == nil {
+		t.Fatal("an observer that does not catch up is reported")
+	}
+	close(block)
+}

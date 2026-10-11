@@ -78,6 +78,8 @@ const (
 	StatePending State = "pending"
 	StateSuccess State = "success"
 	StateFailure State = "failure"
+	// StateError: the run did not reach a verdict (it was stopped, or dymploy itself failed).
+	StateError State = "error"
 )
 
 // ErrRefNotFound is returned by a Resolver when the branch or tag does not exist.
