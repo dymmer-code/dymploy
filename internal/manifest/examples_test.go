@@ -149,20 +149,24 @@ func TestSchemaRequiredKeysMatchTheParser(t *testing.T) {
 		req = append(req, r.(string))
 	}
 	sort.Strings(req)
-	if strings.Join(req, ",") != "artifact,build,version" {
+	if strings.Join(req, ",") != "build,version" {
 		t.Fatalf("%v", req)
 	}
 	// and the parser really requires them
-	for _, drop := range []string{"build", "artifact"} {
-		src := minimal
-		if drop == "build" {
-			src = "version: 1\nartifact:\n  paths: [out]\n"
-		} else {
-			src = "version: 1\nbuild:\n  image: {from: \"debian:13\"}\n  steps: [{run: make}]\n"
-		}
-		if _, err := Parse([]byte(src)); err == nil {
-			t.Errorf("a manifest without %s must be refused", drop)
-		}
+	if _, err := Parse([]byte("version: 1\nartifact:\n  paths: [out]\n")); err == nil {
+		t.Error("a manifest without build must be refused")
+	}
+	// the artifact is required only by a deploy, and the schema says so too
+	dep, _ := root["dependentRequired"].(map[string]any)
+	if got, _ := dep["deploy"].([]any); len(got) != 1 || got[0] != "artifact" {
+		t.Errorf("the schema must tie deploy to artifact: %v", dep)
+	}
+	noArtifact := "version: 1\nbuild:\n  image: {from: \"debian:13\"}\n  steps: [{run: make}]\n"
+	if m, err := Parse([]byte(noArtifact)); err != nil || m.HasArtifact() {
+		t.Errorf("a job that only checks the code has no artifact: %v", err)
+	}
+	if _, err := Parse([]byte(noArtifact + "deploy:\n  target: production\n  steps: [{run: x}]\n")); err == nil || !strings.Contains(err.Error(), "a deploy needs an artifact") {
+		t.Errorf("a deploy without an artifact must be refused: %v", err)
 	}
 }
 

@@ -231,7 +231,7 @@ func TestBadQueriesAreRefused(t *testing.T) {
 	defer srv.Close()
 	f.add(job.Job{ID: "a", State: job.Succeeded})
 	for _, path := range []string{
-		"/v1/jobs?state=bogus", "/v1/jobs?limit=-1", "/v1/jobs?limit=x", "/v1/jobs?limit=5000",
+		"/v1/jobs?state=bogus", "/v1/jobs?number=0", "/v1/jobs?number=x", "/v1/jobs?limit=-1", "/v1/jobs?limit=x", "/v1/jobs?limit=5000",
 		"/v1/jobs/a/logs?after=-3", "/v1/jobs/a/logs?after=x", "/v1/jobs/a/logs?limit=0", "/v1/jobs/a/logs?limit=999999",
 		"/v1/events?after=x",
 	} {
@@ -319,7 +319,19 @@ func (w *watcher) next(t *testing.T) Message {
 	select {
 	case m := <-w.msgs:
 		return m
+	default:
+	}
+	select {
+	case m := <-w.msgs:
+		return m
 	case err := <-w.done:
+		// the channel may have ended right after the message we want: look once more
+		select {
+		case m := <-w.msgs:
+			w.done <- err
+			return m
+		default:
+		}
 		t.Fatalf("the channel ended while waiting for a message: %v", err)
 	case <-time.After(3 * time.Second):
 		t.Fatal("no message")

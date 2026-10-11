@@ -54,6 +54,44 @@ func RunStore(t *testing.T, factory func(t *testing.T) job.Store, reopen func(t 
 			t.Fatalf("%+v", got)
 		}
 	})
+	t.Run("run numbers count up per name and are never reused", func(t *testing.T) {
+		s := factory(t)
+		next := func(name string) int {
+			n, err := s.NextNumber(ctx, name)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return n
+		}
+		if next("a") != 1 || next("a") != 2 || next("b") != 1 || next("a") != 3 {
+			t.Fatal("each name has its own sequence, starting at 1")
+		}
+		j := mk(1, "a", job.Succeeded)
+		j.Number = 3
+		_ = s.Put(ctx, j)
+		_ = s.Delete(ctx, j.ID)
+		if next("a") != 4 {
+			t.Fatal("deleting jobs must not send a name back to #1")
+		}
+		if reopen != nil {
+			s = reopen(t, s)
+			if next("a") != 5 || next("b") != 2 {
+				t.Fatal("the sequences survive a restart")
+			}
+		}
+	})
+	t.Run("a filter can ask for a run number", func(t *testing.T) {
+		s := factory(t)
+		for i, n := range []int{1, 2, 3} {
+			j := mk(i+1, "n", job.Succeeded)
+			j.Number = n
+			_ = s.Put(ctx, j)
+		}
+		got, _ := s.List(ctx, job.Filter{Name: "n", Number: 2})
+		if len(got) != 1 || got[0].Number != 2 {
+			t.Fatalf("%+v", got)
+		}
+	})
 	t.Run("put replaces", func(t *testing.T) {
 		s := factory(t)
 		j := mk(1, "n", job.Queued)

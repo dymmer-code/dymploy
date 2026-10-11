@@ -1,0 +1,6 @@
+#!/bin/sh
+# Only what the deploy needs: "systemctl restart shop.service", done by hand instead of by systemd.
+[ "$1 $2" = "restart shop.service" ] || { echo "unsupported: $*" >&2; exit 1; }
+pkill -u shop -f 'erts.*beam' 2>/dev/null; sleep 1
+set -a; . /etc/shop.env; set +a
+runuser -u shop -- sh -c 'cd /var/lib/shop && PHX_SERVER=true nohup /home/deploy-shop/current/bin/shop start >/var/lib/shop/app.log 2>&1 &'

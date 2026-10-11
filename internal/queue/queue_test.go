@@ -973,3 +973,22 @@ func TestASlowStopIsComplainedAboutInTheDaemonLog(t *testing.T) {
 type writerFunc func([]byte)
 
 func (f writerFunc) Write(p []byte) (int, error) { f(p); return len(p), nil }
+
+func TestEveryRunOfANameIsNumbered(t *testing.T) {
+	e := newEnv(t, Config{MaxConcurrent: 2}, runnertest.Exit(0))
+	e.start(t)
+	a1, b1, a2 := e.submit(t, "github/acme/a"), e.submit(t, "github/acme/b"), e.submit(t, "github/acme/a")
+	if a1.Number != 1 || b1.Number != 1 || a2.Number != 2 {
+		t.Fatalf("each repository counts its own runs: %d %d %d", a1.Number, b1.Number, a2.Number)
+	}
+	done := e.waitState(t, a1.ID, job.Succeeded)
+	retry, err := e.m.Retry(context.Background(), done.ID)
+	if err != nil || retry.Number != 3 || retry.RetryOf != done.ID {
+		t.Fatalf("a retry is a new run with the next number: %v %+v", err, retry)
+	}
+	e.waitState(t, retry.ID, job.Succeeded)
+	got, _ := e.m.List(context.Background(), job.Filter{Name: "github/acme/a", Number: 2})
+	if len(got) != 1 || got[0].ID != a2.ID {
+		t.Fatalf("a run is found by its number: %+v", got)
+	}
+}

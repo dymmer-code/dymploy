@@ -52,6 +52,9 @@ type Config struct {
 	// Deployer, if set, delivers the artifact to the target a definition names. Without it a definition
 	// that asks to deploy fails before anything is built.
 	Deployer *deploy.Deployer
+	// NoDeploy builds and packs but does not deliver: a definition's deploy section is left alone (not
+	// even its target is looked at). For trying a definition out.
+	NoDeploy bool
 	// StopGrace is how long a container gets to stop before being killed; 0 means 10 s.
 	StopGrace time.Duration
 }
@@ -106,7 +109,9 @@ func (r *Runner) Run(ctx context.Context, t runner.Task) (runner.Result, error) 
 	log.System("manifest: " + m.Summary())
 
 	var target deploy.Target
-	if m.HasDeploy() {
+	if m.HasDeploy() && r.cfg.NoDeploy {
+		log.System("this definition deploys to " + m.Deploy.Target + ": not delivered in this run")
+	} else if m.HasDeploy() {
 		// Checked before building: a definition that asks for a target it cannot use must fail at once.
 		if r.cfg.Deployer == nil {
 			log.Stderr().Write([]byte("this server is not set up to deploy\n"))
@@ -132,7 +137,7 @@ func (r *Runner) Run(ctx context.Context, t runner.Task) (runner.Result, error) 
 		return runner.Result{}, errors.New("the task has no usable job id")
 	}
 	res, err := b.run(ctx)
-	if err != nil || res.ExitCode != 0 || !m.HasDeploy() {
+	if err != nil || res.ExitCode != 0 || !m.HasDeploy() || r.cfg.NoDeploy {
 		return res, err
 	}
 	return b.deploy(ctx, target)
@@ -261,6 +266,10 @@ func (b *build) run(ctx context.Context) (runner.Result, error) {
 		}
 	}
 
+	if !b.m.HasArtifact() {
+		log.System("no artifact declared: nothing to pack")
+		return runner.Result{}, nil
+	}
 	log.System("packing the artifact")
 	res, err := artifact.Pack(b.dir, artifact.Spec{
 		Name: b.m.Artifact.Name, Paths: b.m.Artifact.Paths, Exclude: b.m.Artifact.Exclude,

@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"github.com/dymmer-code/dymploy/internal/control"
 	"io"
 	"net/http"
 	"os"
@@ -30,8 +31,13 @@ type holdRig struct {
 
 func startHold(t *testing.T, extra string) *holdRig {
 	t.Helper()
+	return startHoldSlow(t, extra, 300*time.Millisecond)
+}
+
+// startHoldSlow is startHold with a runner that takes cleanup to stop after being asked.
+func startHoldSlow(t *testing.T, extra string, cleanup time.Duration) *holdRig {
+	t.Helper()
 	r := &holdRig{gate: runnertest.NewGate(), dir: tmpDir(t), done: make(chan error, 1), ended: make(chan struct{}), out: &syncBuffer{}}
-	cleanup := 300 * time.Millisecond
 	extraRunners = []func(*runner.Registry){func(reg *runner.Registry) {
 		reg.MustRegister("hold", runnertest.New(func(ctx context.Context, tk runner.Task) (runner.Result, error) {
 			tk.Log.System("working")
@@ -335,19 +341,25 @@ func TestAReloadThatRemovesARepositoryStopsItsJobsProperly(t *testing.T) {
 	}
 	r.push(t, "rl-1", "other") // runs
 	waitFor(t, func() bool { return len(r.jobs(t, "running")) == 1 })
-	r.push(t, "rl-2", "shop") // waits behind it
+	r.push(t, "rl-3", "other")   // waits behind the first one of its repository
+	r.push(t, "rl-2", "shop") // another repository, also waiting
+	waitFor(t, func() bool { return len(r.jobs(t, "queued")) == 2 })
 
 	if err := os.Remove(filepath.Join(r.dir, "config.d", "50-other.yaml")); err != nil {
 		t.Fatal(err)
 	}
 	out, err := r.cli(t, "reload")
-	if err != nil || !strings.Contains(out, "stop requested for 1 job the new configuration no longer allows") {
-		t.Fatalf("%v %q", err, out)
+	if err != nil || !strings.Contains(out, "stop requested for 2 jobs the new configuration no longer allows") {
+		t.Fatalf("the running job and the one waiting behind it both go: %v %q", err, out)
 	}
-	waitFor(t, func() bool { return len(r.jobs(t, "aborted")) == 1 })
-	a := r.jobs(t, "aborted")[0]
-	if a.Name != "github/acme/other" || !strings.Contains(a.StopReason, "no longer allowed by the configuration after a reload") {
-		t.Fatalf("%+v", a)
+	waitFor(t, func() bool { return len(r.jobs(t, "aborted")) == 2 })
+	for _, a := range r.jobs(t, "aborted") {
+		if a.Name != "github/acme/other" || !strings.Contains(a.StopReason, "no longer allowed by the configuration after a reload") || a.FinishedAt.IsZero() {
+			t.Fatalf("%+v", a)
+		}
+	}
+	if q := r.jobs(t, "queued"); len(q) != 0 {
+		t.Fatalf("nothing of the removed repository stays in the queue: %+v", q)
 	}
 	// the one the policy still allows carries on
 	waitFor(t, func() bool { return len(r.jobs(t, "running")) == 1 })
@@ -355,4 +367,90 @@ func TestAReloadThatRemovesARepositoryStopsItsJobsProperly(t *testing.T) {
 		t.Fatalf("%+v", j)
 	}
 	_ = sync.Mutex{}
+}
+
+func TestEveryDaemonCommandReportsABrokenConfiguration(t *testing.T) {
+	p := filepath.Join(tmpDir(t), "broken.yaml")
+	os.WriteFile(p, []byte("listen: nope\n"), 0o600)
+	for _, args := range [][]string{{"queue"}, {"stop"}, {"abort", "x"}, {"retry", "x"}, {"job", "x"}, {"logs", "x"}, {"watch"}, {"jobs"}} {
+		if _, _, err := run(t, context.Background(), append(args, "--config", p)...); err == nil || !strings.Contains(err.Error(), "broken.yaml") {
+			t.Errorf("%v: %v", args, err)
+		}
+	}
+}
+
+func TestStopOfADaemonThatCannotBeStoppedThroughTheSocket(t *testing.T) {
+	sock := filepath.Join(tmpDir(t), "c.sock")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ready := make(chan struct{})
+	go control.Serve(ctx, sock, control.Handlers{Status: func() control.Status { return control.Status{} }}, func() { close(ready) })
+	<-ready
+	if _, _, err := run(t, context.Background(), "stop", "--socket", sock); err == nil || !strings.Contains(err.Error(), "cannot be stopped") {
+		t.Fatalf("%v", err)
+	}
+}
+
+func TestPressingCtrlCWhileWaitingLeavesTheDaemonDoingWhatWasAsked(t *testing.T) {
+	r := startHold(t, "")
+	r.push(t, "cc-1", "shop")
+	waitFor(t, func() bool { return len(r.jobs(t, "running")) == 1 })
+	ctx, cancel := context.WithCancel(context.Background())
+	time.AfterFunc(800*time.Millisecond, cancel)
+	out, _, err := run(t, ctx, "stop", "--graceful", "--config", r.cfg)
+	if err != nil || !strings.Contains(out, "no longer waiting") {
+		t.Fatalf("%v %q", err, out)
+	}
+	if st, _ := r.cli(t, "status"); !strings.Contains(st, "draining") {
+		t.Fatalf("it keeps draining: %q", st)
+	}
+}
+
+func TestStoppingTwiceAndTheOtherWayRound(t *testing.T) {
+	r := startHold(t, "")
+	r.push(t, "tw-1", "shop")
+	waitFor(t, func() bool { return len(r.jobs(t, "running")) == 1 })
+	if out, _ := r.cli(t, "stop", "--no-wait"); !strings.Contains(out, "stopping:") {
+		t.Fatalf("%q", out)
+	}
+	if out, err := r.cli(t, "stop", "--no-wait"); err == nil && !strings.Contains(out, "already stopping") {
+		t.Fatalf("a second stop says it is already under way: %v %q", err, out)
+	}
+	if _, err := r.cli(t, "stop", "--graceful", "--no-wait"); err != nil && !strings.Contains(err.Error(), "already stopping") && !strings.Contains(err.Error(), "cannot reach") {
+		t.Fatalf("a graceful request while stopping is refused clearly: %v", err)
+	}
+	r.waitServeEnds(t)
+}
+
+func TestJobsThatDoNotStopInTimeAreLeftBehindAfterTheShutdownTimeout(t *testing.T) {
+	r := startHoldSlow(t, "shutdown_timeout: 1s\n", 5*time.Second) // takes five seconds to stop, is given one
+	r.push(t, "to-1", "shop")
+	waitFor(t, func() bool { return len(r.jobs(t, "running")) == 1 })
+	start := time.Now()
+	if _, err := r.cli(t, "stop", "--reason", "now", "--no-wait"); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-r.ended:
+		if err := <-r.done; err == nil || !strings.Contains(err.Error(), "waiting for running jobs to stop") {
+			t.Fatalf("an unclean stop is an error, so that whoever supervises dymploy notices: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the daemon did not leave")
+	}
+	if d := time.Since(start); d < 900*time.Millisecond || d > 4500*time.Millisecond {
+		t.Fatalf("the daemon waits for shutdown_timeout and then leaves: %s", d)
+	}
+	if !strings.Contains(r.out.String(), "some jobs did not stop in time") {
+		t.Fatalf("and says so:\n%s", r.out.String())
+	}
+}
+
+func TestASecondSignalLeavesAtOnce(t *testing.T) {
+	r := startHold(t, "shutdown_timeout: 30s\n")
+	r.push(t, "sg-1", "shop")
+	waitFor(t, func() bool { return len(r.jobs(t, "running")) == 1 })
+	syscall.Kill(os.Getpid(), syscall.SIGINT)
+	syscall.Kill(os.Getpid(), syscall.SIGINT)
+	r.waitServeEnds(t)
 }

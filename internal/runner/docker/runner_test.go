@@ -596,3 +596,25 @@ func TestTheGitDirectoryIsReadOnlyInsideTheBuild(t *testing.T) {
 		t.Fatalf("%+v", r.eng.Created[0].Mounts)
 	}
 }
+
+func TestAJobThatOnlyChecksTheCodePacksAndDeploysNothing(t *testing.T) {
+	r := newDeployRig(t, "version: 1\nbuild:\n  image: {from: \"alpine:3\"}\n  steps: [{name: tests, run: \"make test\"}]\n", true)
+	r.eng.Script = func(docker.ContainerSpec) dockertest.Behavior {
+		return dockertest.Behavior{Stdout: "12 tests, 0 failures\n"}
+	}
+	res, err := r.do(context.Background())
+	if err != nil || res.ExitCode != 0 || !strings.Contains(r.log(), "stdout: 12 tests, 0 failures") || !strings.Contains(r.log(), "no artifact declared") {
+		t.Fatalf("%+v %v\n%s", res, err, r.log())
+	}
+	if _, err := os.Stat(filepath.Join(r.arts, "job-1")); err == nil || len(r.remote.Dialed) != 0 {
+		t.Fatal("no artifact directory, no deploy")
+	}
+	// and when the tests fail, so does the job, with the tests' own exit code
+	r = newDeployRig(t, "version: 1\nbuild:\n  image: {from: \"alpine:3\"}\n  steps: [{name: tests, run: \"make test\"}]\n", true)
+	r.eng.Script = func(docker.ContainerSpec) dockertest.Behavior {
+		return dockertest.Behavior{ExitCode: 2, Stderr: "1 failure\n"}
+	}
+	if res, err := r.do(context.Background()); err != nil || res.ExitCode != 2 {
+		t.Fatalf("%+v %v", res, err)
+	}
+}

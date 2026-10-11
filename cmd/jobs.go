@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"strconv"
 	"strings"
 	"time"
 
@@ -168,7 +169,37 @@ func jobLine(j job.Job) string {
 	if j.ExitCode != nil && j.State != job.Succeeded {
 		result += fmt.Sprintf(" (exit %d)", *j.ExitCode)
 	}
-	return fmt.Sprintf("%-18s %-22s %-34s %s ago", j.ID, result, j.Name, since(j.CreatedAt))
+	return fmt.Sprintf("%-36s %-22s %s ago  (%s)", runName(j), result, since(j.CreatedAt), j.ID)
+}
+
+// runName is how a run is called: "github/acme/app #12".
+func runName(j job.Job) string {
+	if j.Number > 0 {
+		return fmt.Sprintf("%s #%d", j.Name, j.Number)
+	}
+	return j.Name
+}
+
+// resolveJob turns a reference into a job id. "github/acme/app#12" (or "github/acme/app #12") is the
+// twelfth run of that name; anything else is taken as an id.
+func resolveJob(ctx context.Context, cl *control.Client, ref string) (string, error) {
+	i := strings.LastIndex(ref, "#")
+	if i < 0 {
+		return ref, nil
+	}
+	name, num := strings.TrimSpace(ref[:i]), strings.TrimSpace(ref[i+1:])
+	n, err := strconv.Atoi(num)
+	if err != nil || n < 1 || name == "" {
+		return "", fmt.Errorf("%q is not a run: write it like github/owner/repo#12", ref)
+	}
+	jobs, err := cl.Jobs(ctx, job.Filter{Name: name, Number: n, Limit: 1})
+	if err != nil {
+		return "", err
+	}
+	if len(jobs) == 0 {
+		return "", fmt.Errorf("there is no run #%d of %s", n, name)
+	}
+	return string(jobs[0].ID), nil
 }
 
 func newJobsCmd() *cobra.Command {
@@ -219,7 +250,7 @@ func newJobCmd() *cobra.Command {
 	var configPath, socket string
 	var asJSON bool
 	c := &cobra.Command{
-		Use:   "job <id>",
+		Use:   "job <id | name#N>",
 		Short: "Show one job",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(c *cobra.Command, args []string) error {
@@ -227,7 +258,11 @@ func newJobCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			j, err := cl.Job(c.Context(), args[0])
+			id, err := resolveJob(c.Context(), cl, args[0])
+			if err != nil {
+				return err
+			}
+			j, err := cl.Job(c.Context(), id)
 			if err != nil {
 				return err
 			}
@@ -235,7 +270,10 @@ func newJobCmd() *cobra.Command {
 			if asJSON {
 				return printJSON(out, j)
 			}
-			fmt.Fprintf(out, "job      %s\nname     %s\nkind     %s\nstate    %s\n", j.ID, j.Name, j.Kind, j.State)
+			fmt.Fprintf(out, "run      %s\njob      %s\nkind     %s\nstate    %s\n", runName(j), j.ID, j.Kind, j.State)
+			if j.StopReason != "" {
+				fmt.Fprintf(out, "stopped  %s\n", j.StopReason)
+			}
 			if j.ExitCode != nil {
 				fmt.Fprintf(out, "exit     %d\n", *j.ExitCode)
 			}
@@ -276,7 +314,7 @@ func newLogsCmd() *cobra.Command {
 	var follow bool
 	var after int64
 	c := &cobra.Command{
-		Use:   "logs <id>",
+		Use:   "logs <id | name#N>",
 		Short: "Show the log of a job (-f to follow it until it ends)",
 		Long:  "Lines marked # are dymploy narrating, lines marked ! are the standard error of the work.",
 		Args:  cobra.ExactArgs(1),
@@ -285,9 +323,13 @@ func newLogsCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			id, err := resolveJob(c.Context(), cl, args[0])
+			if err != nil {
+				return err
+			}
 			out := c.OutOrStdout()
 			if follow {
-				return cl.Watch(c.Context(), args[0], after, func(m control.Message) error {
+				return cl.Watch(c.Context(), id, after, func(m control.Message) error {
 					if m.Type == "output" && m.Entry != nil {
 						fmt.Fprintln(out, entryLine(*m.Entry))
 					}
@@ -295,7 +337,7 @@ func newLogsCmd() *cobra.Command {
 				})
 			}
 			for {
-				entries, err := cl.Logs(c.Context(), args[0], after, 1000)
+				entries, err := cl.Logs(c.Context(), id, after, 1000)
 				if err != nil {
 					return err
 				}
@@ -318,7 +360,7 @@ func newLogsCmd() *cobra.Command {
 func newAbortCmd() *cobra.Command {
 	var configPath, socket, reason string
 	c := &cobra.Command{
-		Use:   "abort <id>",
+		Use:   "abort <id | name#N>",
 		Short: "Stop a waiting or running job, saying why",
 		Long: `A waiting job never runs. A running job is asked to stop: its runner stops the processes it started
 (containers get a chance to end before being killed), releases what it holds, and only then the job is
@@ -330,7 +372,11 @@ job with "dymploy logs -f <id>".`,
 			if err != nil {
 				return err
 			}
-			msg, err := cl.Abort(c.Context(), args[0], reason)
+			id, err := resolveJob(c.Context(), cl, args[0])
+			if err != nil {
+				return err
+			}
+			msg, err := cl.Abort(c.Context(), id, reason)
 			if err != nil {
 				return err
 			}
@@ -346,7 +392,7 @@ job with "dymploy logs -f <id>".`,
 func newRetryCmd() *cobra.Command {
 	var configPath, socket string
 	c := &cobra.Command{
-		Use:   "retry <id>",
+		Use:   "retry <id | name#N>",
 		Short: "Run a finished job again as a new job",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(c *cobra.Command, args []string) error {
@@ -354,11 +400,15 @@ func newRetryCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			j, err := cl.Retry(c.Context(), args[0])
+			id, err := resolveJob(c.Context(), cl, args[0])
 			if err != nil {
 				return err
 			}
-			fmt.Fprintf(c.OutOrStdout(), "queued %s (retry of %s)\n", j.ID, args[0])
+			j, err := cl.Retry(c.Context(), id)
+			if err != nil {
+				return err
+			}
+			fmt.Fprintf(c.OutOrStdout(), "queued %s (retry of %s)\n", runName(j), args[0])
 			return nil
 		},
 	}
@@ -448,7 +498,7 @@ Without arguments it shows what is waiting and running now.`,
 			if err != nil {
 				return err
 			}
-			fmt.Fprintf(out, "queued %s (%s at %s)\n", j.ID, j.Name, ref)
+			fmt.Fprintf(out, "queued %s at %s (%s)\n", runName(j), ref, j.ID)
 			if !follow {
 				return nil
 			}

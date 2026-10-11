@@ -114,6 +114,12 @@ var schema []byte
 // structure to what the parser accepts.
 func Schema() []byte { return schema }
 
+// HasArtifact reports whether the build produces an artifact. A job that only checks the code (tests,
+// linters) has none; a job that deploys always does.
+func (m *Manifest) HasArtifact() bool {
+	return m.Artifact.Name != "" || len(m.Artifact.Paths) > 0 || len(m.Artifact.Exclude) > 0
+}
+
 // HasDeploy reports whether the manifest delivers the artifact anywhere.
 func (m *Manifest) HasDeploy() bool { return m.Deploy != nil }
 
@@ -123,7 +129,12 @@ func (m *Manifest) Summary() string {
 	if len(m.Build.Steps) == 1 {
 		steps = "1 step"
 	}
-	parts := []string{"build: " + steps, "artifact: " + m.Artifact.Name}
+	parts := []string{"build: " + steps}
+	if m.HasArtifact() {
+		parts = append(parts, "artifact: "+m.Artifact.Name)
+	} else {
+		parts = append(parts, "no artifact")
+	}
 	if m.Deploy != nil {
 		parts = append(parts, "deploy: "+m.Deploy.Target)
 	}

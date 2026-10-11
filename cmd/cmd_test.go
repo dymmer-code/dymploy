@@ -1466,7 +1466,7 @@ func TestQueueCommand(t *testing.T) {
 	<-ready
 
 	out, _, err := run(t, ctx, "queue", "github/acme/app", "--ref", "main", "--socket", sock)
-	if err != nil || !strings.Contains(out, "queued hand-1 (github/acme/app at main)") || len(jobs.queued) != 1 || jobs.queued[0].Ref != "main" {
+	if err != nil || !strings.Contains(out, "queued github/acme/app at main (hand-1)") || len(jobs.queued) != 1 || jobs.queued[0].Ref != "main" {
 		t.Fatalf("%v %q %+v", err, out, jobs.queued)
 	}
 	out, _, err = run(t, ctx, "queue", "--socket", sock)
@@ -1494,4 +1494,39 @@ func TestQueueCommand(t *testing.T) {
 	if _, _, err := run(t, ctx, "queue", "--config", filepath.Join(tmpDir(t), "broken.yaml")); err == nil {
 		t.Log("a missing configuration falls back to the default socket")
 	}
+}
+
+func TestRunsAreCalledByTheirNumber(t *testing.T) {
+	cfg, addr, id, stop := finishedJob(t, "")
+	defer stop()
+	ctx := context.Background()
+	out, _, err := run(t, ctx, "jobs", "--config", cfg)
+	if err != nil || !strings.Contains(out, "github/acme/shop #1") || !strings.Contains(out, "("+id+")") {
+		t.Fatalf("%v %q", err, out)
+	}
+	for _, ref := range []string{"github/acme/shop#1", "github/acme/shop #1"} {
+		out, _, err = run(t, ctx, "job", ref, "--config", cfg)
+		if err != nil || !strings.Contains(out, "run      github/acme/shop #1") || !strings.Contains(out, id) {
+			t.Fatalf("%q: %v %q", ref, err, out)
+		}
+	}
+	if out, _, err = run(t, ctx, "logs", "github/acme/shop#1", "--config", cfg); err != nil || !strings.Contains(out, "job finished: succeeded") {
+		t.Fatalf("%v %q", err, out)
+	}
+	if out, _, err = run(t, ctx, "retry", "github/acme/shop#1", "--config", cfg); err != nil || !strings.Contains(out, "queued github/acme/shop #2 (retry of github/acme/shop#1)") {
+		t.Fatalf("%v %q", err, out)
+	}
+	waitFor(t, func() bool {
+		o, _, _ := run(t, ctx, "job", "github/acme/shop#2", "--config", cfg)
+		return strings.Contains(o, "succeeded")
+	})
+	if _, _, err = run(t, ctx, "abort", "github/acme/shop#1", "--config", cfg); err == nil || !strings.Contains(err.Error(), "already finished") {
+		t.Fatalf("%v", err)
+	}
+	for ref, want := range map[string]string{"github/acme/shop#9": "no run #9", "github/acme/shop#x": "is not a run", "#3": "is not a run", "github/nobody/none#1": "no run #1"} {
+		if _, _, err := run(t, ctx, "job", ref, "--config", cfg); err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("%s: %v", ref, err)
+		}
+	}
+	_ = addr
 }

@@ -256,8 +256,12 @@ func (m *Manager) Submit(ctx context.Context, r Request) (job.Job, error) {
 		return job.Job{}, ErrQueueFull
 	}
 	now := m.d.Now()
+	number, err := m.d.Store.NextNumber(ctx, r.Name)
+	if err != nil {
+		return job.Job{}, fmt.Errorf("numbering the job: %w", err)
+	}
 	j := job.Job{
-		ID: m.d.NewID(now), Name: r.Name, Kind: r.Kind, State: job.Queued,
+		ID: m.d.NewID(now), Name: r.Name, Number: number, Kind: r.Kind, State: job.Queued,
 		Params: r.Params, Input: r.Input, CreatedAt: now, RetryOf: r.RetryOf,
 	}
 	if err := m.d.Store.Put(ctx, j); err != nil {

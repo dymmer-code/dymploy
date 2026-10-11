@@ -3,6 +3,7 @@ package job
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -12,7 +13,10 @@ import (
 	bolt "go.etcd.io/bbolt"
 )
 
-var jobsBucket = []byte("jobs")
+var (
+	jobsBucket    = []byte("jobs")
+	numbersBucket = []byte("numbers")
+)
 
 // BoltStore is a Store persisted in a single bbolt file (pure Go, no cgo, one writer process).
 type BoltStore struct{ db *bolt.DB }
@@ -28,7 +32,10 @@ func OpenBolt(path string) (*BoltStore, error) {
 		return nil, fmt.Errorf("opening the job database %s (is another dymploy using it?): %w", path, err)
 	}
 	if err := db.Update(func(tx *bolt.Tx) error {
-		_, err := tx.CreateBucketIfNotExists(jobsBucket)
+		if _, err := tx.CreateBucketIfNotExists(jobsBucket); err != nil {
+			return err
+		}
+		_, err := tx.CreateBucketIfNotExists(numbersBucket)
 		return err
 	}); err != nil {
 		db.Close()
@@ -82,6 +89,23 @@ func (s *BoltStore) List(_ context.Context, f Filter) ([]Job, error) {
 		return nil
 	})
 	return out, err
+}
+
+// NextNumber implements Store. The counters live in their own bucket, so deleting old jobs never
+// sends a name back to #1.
+func (s *BoltStore) NextNumber(_ context.Context, name string) (int, error) {
+	var n uint64
+	err := s.db.Update(func(tx *bolt.Tx) error {
+		b := tx.Bucket(numbersBucket)
+		if v := b.Get([]byte(name)); len(v) == 8 {
+			n = binary.BigEndian.Uint64(v)
+		}
+		n++
+		var buf [8]byte
+		binary.BigEndian.PutUint64(buf[:], n)
+		return b.Put([]byte(name), buf[:])
+	})
+	return int(n), err
 }
 
 // Delete implements Store.

@@ -82,6 +82,26 @@ Answers: `202` accepted · `200` ignored (ping, other events, deleted refs) or d
 `400` malformed · `401` not authenticated · `403` outside the policy · `405` not POST · `413` too large ·
 `429` rate limited · `503` queue full (retry).
 
+## Trying a definition without pushing anything
+
+```sh
+cd my-repository
+dymploy validate                                  # the file is well formed
+dymploy try                                       # build and pack it here, like a job would
+dymploy try --deploy --config etc/config.yaml     # and deliver it to the target the file names
+```
+
+`dymploy try` needs no webhook, GitHub App, daemon or clone: it takes what git tracks in the directory plus your uncommitted
+changes and new files that are not ignored (so a `dymploy.yaml` that is not committed yet works, and secrets that are git-ignored
+never reach the build), copies them into a throw-away directory and runs them with the same runner as the daemon (the same
+containers, limits, caches and artifact), showing the log as it happens. Ctrl-C stops the containers properly. The deploy
+section is **left alone** unless you pass `--deploy`, which needs a configuration with the target; the target's `allow`
+rules are applied to the repository and branch the run pretends to be (taken from `origin` and the current branch, or `--name`
+and `--ref`), so a try cannot do what a push could not. Artifacts and caches go under the user cache directory (`--out`).
+
+`examples/rehearsal/` starts a stand-in for the target (Debian 13 with sshd, a deploy user that may restart one service, a
+PostgreSQL) so that a whole build-and-deploy can be watched on a laptop before the real server exists.
+
 ## The `dymploy.yaml` file
 
 Every repository that dymploy builds has a `dymploy.yaml` in its root. It says how to build (in Docker), what to
@@ -106,6 +126,9 @@ deploy:
   steps:
     - run: tar -xzf "$DYMPLOY_ARTIFACT" -C /srv/apps/app --strip-components=1
 ```
+
+`artifact` and `deploy` are optional. A job with neither only checks the code (`examples/tests-only.yaml`): it builds, runs
+its steps and succeeds or fails with them; a `deploy` always needs an `artifact`.
 
 The file is treated as untrusted: unknown keys, anchors and aliases are errors, every size is bounded, paths
 cannot leave the repository, and credentials and machines can never be written in it. The full reference is in `docs/dymploy-yaml.md`.
@@ -141,7 +164,9 @@ repo_keep_days: 14
 
 ## Queue and runners
 
-Accepted events become jobs. A job is named after its repository (`github/owner/repo`): jobs with the
+Accepted events become jobs. A job is named after its repository (`github/owner/repo`) and every run of it is numbered, as in
+any CI: `github/acme/shop #12` is the twelfth run of that repository, and numbers are never reused (`dymploy job
+github/acme/shop#12`, `logs`, `abort` and `retry` take that as well as the id). Jobs with the
 same name never run at the same time, and at most `queue.max_concurrent` run at once. Each job has a
 state (`queued`, `running`, `succeeded`, `failed`, `aborted`, `interrupted`), a history and a log
 (`<data_dir>/logs/<job>.jsonl`, one line per entry, written as it happens, capped at

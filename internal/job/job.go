@@ -52,10 +52,13 @@ func (s State) Final() bool {
 
 // Job is one unit of work and its history.
 type Job struct {
-	ID    ID     `json:"id"`
-	Name  string `json:"name"`
-	Kind  string `json:"kind"`
-	State State  `json:"state"`
+	ID   ID     `json:"id"`
+	Name string `json:"name"`
+	// Number is the run number within the name: the first run of github/acme/app is #1, the next #2…
+	// Numbers are never reused, so "github/acme/app #12" always means the same run.
+	Number int    `json:"number,omitempty"`
+	Kind   string `json:"kind"`
+	State  State  `json:"state"`
 	// Params and Input are opaque to everything but the runner of Kind.
 	Params json.RawMessage `json:"params,omitempty"`
 	Input  json.RawMessage `json:"input,omitempty"`
@@ -78,12 +81,16 @@ type Job struct {
 type Filter struct {
 	States []State // any of these; empty means any
 	Name   string  // exact name; empty means any
+	Number int     // run number within the name; 0 means any
 	Limit  int     // 0 means no limit
 }
 
 // Matches reports whether j passes the filter (the limit aside).
 func (f Filter) Matches(j Job) bool {
 	if f.Name != "" && j.Name != f.Name {
+		return false
+	}
+	if f.Number != 0 && j.Number != f.Number {
 		return false
 	}
 	if len(f.States) == 0 {
@@ -108,6 +115,9 @@ type Store interface {
 	// List returns matching jobs, newest first.
 	List(ctx context.Context, f Filter) ([]Job, error)
 	Delete(ctx context.Context, id ID) error
+	// NextNumber returns the next run number for a name: 1, 2, 3… It never repeats, not even after
+	// the jobs that had the earlier numbers have been deleted.
+	NextNumber(ctx context.Context, name string) (int, error)
 }
 
 // Entry is one line of a job's log.

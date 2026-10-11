@@ -62,6 +62,9 @@ func (c *Client) Jobs(ctx context.Context, f job.Filter) ([]job.Job, error) {
 	if f.Name != "" {
 		q.Set("name", f.Name)
 	}
+	if f.Number > 0 {
+		q.Set("number", strconv.Itoa(f.Number))
+	}
 	if f.Limit > 0 {
 		q.Set("limit", strconv.Itoa(f.Limit))
 	}

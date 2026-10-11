@@ -8,12 +8,13 @@ import (
 
 // MemStore is an in-memory Store, for tests and for running without persistence.
 type MemStore struct {
-	mu   sync.Mutex
-	jobs map[ID]Job
+	mu      sync.Mutex
+	jobs    map[ID]Job
+	numbers map[string]int
 }
 
 // NewMemStore returns an empty MemStore.
-func NewMemStore() *MemStore { return &MemStore{jobs: map[ID]Job{}} }
+func NewMemStore() *MemStore { return &MemStore{jobs: map[ID]Job{}, numbers: map[string]int{}} }
 
 // Put implements Store.
 func (m *MemStore) Put(_ context.Context, j Job) error {
@@ -57,6 +58,14 @@ func (m *MemStore) Delete(_ context.Context, id ID) error {
 	defer m.mu.Unlock()
 	delete(m.jobs, id)
 	return nil
+}
+
+// NextNumber implements Store.
+func (m *MemStore) NextNumber(_ context.Context, name string) (int, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.numbers[name]++
+	return m.numbers[name], nil
 }
 
 // clone copies the pointer and slice fields so callers cannot alias stored data.

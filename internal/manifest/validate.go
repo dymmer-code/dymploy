@@ -35,7 +35,12 @@ func (v *validator) add(p, format string, a ...any) {
 func (m *Manifest) validate() Errors {
 	v := &validator{}
 	v.build(&m.Build)
-	v.artifact(&m.Artifact)
+	switch {
+	case m.HasArtifact():
+		v.artifact(&m.Artifact)
+	case m.Deploy != nil:
+		v.add("artifact", "a deploy needs an artifact: say which files of the build to pack (artifact.paths)")
+	}
 	if m.Deploy != nil {
 		v.deploy(m.Deploy)
 	}

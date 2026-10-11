@@ -5,7 +5,8 @@
   "description": "How dymploy builds a repository in Docker, packs the result and deploys it. The file names a TARGET; what the target is (host, user, key, which repositories may use it) is configured on the dymploy server, never here.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["version", "build", "artifact"],
+  "required": ["version", "build"],
+  "dependentRequired": {"deploy": ["artifact"]},
   "properties": {
     "version": {"const": 1, "description": "Format version. Always 1 for now."},
     "build": {"$ref": "#/$defs/build"},

@@ -146,6 +146,14 @@ func (a *API) list(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+	if v := q.Get("number"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 {
+			reply(w, http.StatusBadRequest, map[string]string{"error": "number must be a run number (1, 2, 3…)"})
+			return
+		}
+		f.Number = n
+	}
 	if v := q.Get("limit"); v != "" {
 		n, err := strconv.Atoi(v)
 		if err != nil || n < 0 || n > 1000 {
