@@ -339,7 +339,7 @@ or running is stopped the same proper way, with the reason "no longer allowed by
 go vet ./... && go test -race -cover ./...
 ```
 
-See `AGENTS.md` for the working conventions.
+The architecture rules (which packages may import a provider, the container engine or SSH) are enforced by `internal/architecture`.
 
 ## License
 
