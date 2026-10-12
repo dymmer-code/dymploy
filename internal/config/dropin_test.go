@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // layout writes files (relative to a fresh directory) and returns the path of config.yaml.
@@ -234,9 +235,9 @@ func target(extra string) string {
 
 func TestTargetsAreCombinedAcrossFilesAndValidated(t *testing.T) {
 	p := layout(t, map[string]string{
-		"config.d/10-hooks.yaml": hooks,
+		"config.d/10-hooks.yaml":      hooks,
 		"config.d/30-production.yaml": target("    upload_dir: uploads\n    port: 2222\n"),
-		"config.d/31-other.yaml": strings.Replace(target(""), "production:", "static-sites:", 1),
+		"config.d/31-other.yaml":      strings.Replace(target(""), "production:", "static-sites:", 1),
 	})
 	c, err := Load(p)
 	if err != nil {
@@ -271,6 +272,34 @@ func TestTargetValidation(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			_, err := Load(layout(t, map[string]string{"config.d/10-hooks.yaml": hooks, "config.d/30.yaml": tc.body}))
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("want %q, got %v", tc.want, err)
+			}
+		})
+	}
+}
+
+func TestTargetSecretsSource(t *testing.T) {
+	ok := "    secrets:\n      command: [/usr/local/bin/dym, project, shop, secrets, get, --format, dotenv]\n      env_file: /etc/dymploy/dym.env\n      timeout: 45s\n"
+	c, err := Load(layout(t, map[string]string{"config.d/10-hooks.yaml": hooks, "config.d/30.yaml": target(ok)}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sc := c.Targets["production"].Secrets
+	if sc == nil || sc.Command[0] != "/usr/local/bin/dym" || len(sc.Command) != 7 || sc.EnvFile != "/etc/dymploy/dym.env" || sc.Timeout != 45*time.Second {
+		t.Fatalf("%+v", sc)
+	}
+	if c, err := Load(layout(t, map[string]string{"config.d/10-hooks.yaml": hooks, "config.d/30.yaml": target("")})); err != nil || c.Targets["production"].Secrets != nil {
+		t.Fatalf("a target has no secrets source unless it is configured: %v", err)
+	}
+	for name, tc := range map[string]struct{ extra, want string }{
+		"no command":         {"    secrets:\n      env_file: /e\n", "command"},
+		"relative program":   {"    secrets:\n      command: [dym, project]\n", "absolute"},
+		"relative env file":  {"    secrets:\n      command: [/bin/x]\n      env_file: dym.env\n", "env_file"},
+		"too long a timeout": {"    secrets:\n      command: [/bin/x]\n      timeout: 1h\n", "timeout"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := Load(layout(t, map[string]string{"config.d/10-hooks.yaml": hooks, "config.d/30.yaml": target(tc.extra)}))
+			if err == nil || !strings.Contains(err.Error(), "secrets") || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("want %q, got %v", tc.want, err)
 			}
 		})

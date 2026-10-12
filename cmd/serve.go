@@ -20,6 +20,7 @@ import (
 	"github.com/dymmer-code/dymploy/internal/control"
 	"github.com/dymmer-code/dymploy/internal/daemon"
 	"github.com/dymmer-code/dymploy/internal/deploy"
+	"github.com/dymmer-code/dymploy/internal/deploy/secretcmd"
 	"github.com/dymmer-code/dymploy/internal/deploy/sshremote"
 	"github.com/dymmer-code/dymploy/internal/intake"
 	"github.com/dymmer-code/dymploy/internal/job"
@@ -61,7 +62,7 @@ func newServeCmd(version string) *cobra.Command {
 			if err := applyTargets(cfg, remote, targets); err != nil {
 				return err
 			}
-			deployer := &deploy.Deployer{Remote: remote, Targets: targets}
+			deployer := &deploy.Deployer{Remote: remote, Targets: targets, Secrets: secretcmd.New()}
 			mgr, repos, closeState, err := buildQueue(cfg, log, providers, deployer)
 			if err != nil {
 				return err
@@ -209,6 +210,12 @@ func applyTargets(cfg *config.Config, remote deploy.Remote, into *deploy.Targets
 		t := deploy.Target{
 			Name: name, Host: tc.Host, Port: tc.Port, User: tc.User, KeyFile: tc.KeyFile, KnownHosts: tc.KnownHosts,
 			UploadDir: tc.UploadDir, Allow: webhook.Policy{Rules: rulesOf(tc.Allow)},
+		}
+		if tc.Secrets != nil {
+			t.Secrets = &deploy.SecretsSpec{Command: tc.Secrets.Command, EnvFile: tc.Secrets.EnvFile, Timeout: tc.Secrets.Timeout}
+			if err := secretcmd.Check(*t.Secrets); err != nil {
+				return fmt.Errorf("targets.%s.secrets: %w", name, err)
+			}
 		}
 		if err := remote.Check(t); err != nil {
 			return fmt.Errorf("targets.%s: %w", name, err)

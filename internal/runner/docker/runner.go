@@ -118,7 +118,7 @@ func (r *Runner) Run(ctx context.Context, t runner.Task) (runner.Result, error) 
 			return runner.Result{ExitCode: deploy.ExitTargetDenied}, nil
 		}
 		var err error
-		if target, err = r.cfg.Deployer.Authorize(m.Deploy.Target, ev); err != nil {
+		if target, err = r.cfg.Deployer.AuthorizeDeploy(m.Deploy, ev); err != nil {
 			log.Stderr().Write([]byte(err.Error() + "\n"))
 			log.System("nothing was built")
 			return runner.Result{ExitCode: deploy.ExitTargetDenied}, nil

@@ -244,6 +244,10 @@ repository:
   must be listed: nothing is trusted on first use, and a changed host key is refused).
 - `allow`: the repositories, branches and tags that may deploy there (same rules as `policy`). A definition that asks for
   a target that does not exist or that it may not use fails **before anything is built** (exit code 4).
+- `secrets` (optional): a command that prints the target's secrets, for definitions with `deploy.secrets: true`. dymploy
+  runs it (no shell, minimal environment), uploads the output to the target next to the artifact (mode 0600, SHA-256
+  verified, path in `DYMPLOY_SECRETS_FILE`), never logs it, and removes it when the deployment ends. See
+  `docs/dymploy-yaml.md`.
 - A target whose files are missing or unusable stops the daemon from starting, and a reload that contains one is refused
   as a whole.
 
@@ -252,8 +256,8 @@ the archive is read back through its record, uploaded to `upload_dir` over the S
 SHA-256 is **verified on the target before anything runs**, then `deploy.steps` run in order with `sh -ec`, then `check`
 (retried `attempts` times), then `after`. The upload is removed at the end. `DYMPLOY_ARTIFACT` (the remote path),
 `DYMPLOY_ARTIFACT_SHA256`, `DYMPLOY_TARGET`, `DYMPLOY_COMMIT`, `DYMPLOY_SHORT_COMMIT`, `DYMPLOY_OWNER`, `DYMPLOY_REPO`,
-`DYMPLOY_JOB` and `DYMPLOY_BRANCH` or `DYMPLOY_TAG` are available to the steps; secrets and database migrations stay on
-the target.
+`DYMPLOY_JOB` and `DYMPLOY_BRANCH` or `DYMPLOY_TAG` are available to the steps (and `DYMPLOY_SECRETS_FILE` when the
+definition asks for secrets); database migrations stay on the target.
 
 Exit codes: 4 target missing or denied, 5 a deploy step failed, 6 the health check never passed, 7 an `after` step failed
 (the deployment itself is done), 124 `deploy.timeout` ran out. A target that cannot be reached or a damaged upload is an

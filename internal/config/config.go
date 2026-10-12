@@ -137,6 +137,22 @@ type TargetConfig struct {
 	// Allow says which repositories, branches and tags may deploy here. Required: a target nobody can
 	// use is a mistake, and one everybody can use is a risk. It is the same rule as `policy`.
 	Allow []PolicyRule `yaml:"allow"`
+	// Secrets is where the secrets of what is deployed here come from, for definitions that ask for them
+	// (deploy.secrets). It lives here and never in dymploy.yaml: a repository must not be able to name
+	// the source of another application's secrets.
+	Secrets *SecretsConfig `yaml:"secrets"`
+}
+
+// SecretsConfig is a command that prints the target's secrets on its standard output. dymploy runs it
+// itself (no shell, a minimal environment) when a deployment asks for them, and never logs what it prints.
+type SecretsConfig struct {
+	// Command is the program and its arguments; the program must be an absolute path.
+	Command []string `yaml:"command"`
+	// EnvFile is an optional file of NAME=value lines added to the command's environment, for the
+	// credential the command needs (not readable by others).
+	EnvFile string `yaml:"env_file"`
+	// Timeout bounds the command. Default 30s, at most 5m.
+	Timeout time.Duration `yaml:"timeout"`
 }
 
 // PolicyRule allows pushes of one provider to repositories of one owner (see webhook.Rule).
@@ -310,10 +326,33 @@ func (c *Config) validateTargets() error {
 		case len(t.Allow) == 0:
 			return fmt.Errorf("%s.allow is required: say which repositories may deploy here", p)
 		}
+		if err := t.Secrets.validate(); err != nil {
+			return fmt.Errorf("%s.secrets: %w", p, err)
+		}
 		for i, r := range t.Allow {
 			if err := r.validate(c.Webhooks); err != nil {
 				return fmt.Errorf("%s.allow[%d]: %w", p, i, err)
 			}
+		}
+	}
+	return nil
+}
+
+func (s *SecretsConfig) validate() error {
+	if s == nil {
+		return nil
+	}
+	switch {
+	case len(s.Command) == 0 || !filepath.IsAbs(s.Command[0]):
+		return errors.New("command is required and its program must be an absolute path")
+	case s.EnvFile != "" && !filepath.IsAbs(s.EnvFile):
+		return fmt.Errorf("env_file %q must be an absolute path", s.EnvFile)
+	case s.Timeout < 0 || s.Timeout > 5*time.Minute:
+		return errors.New("timeout must be between 0 (the default, 30s) and 5m")
+	}
+	for _, a := range s.Command {
+		if strings.ContainsRune(a, 0) {
+			return errors.New("command arguments must not contain NUL")
 		}
 	}
 	return nil

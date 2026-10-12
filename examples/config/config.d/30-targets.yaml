@@ -7,6 +7,9 @@ targets:
     key_file: /etc/dymploy/targets/production-shop.key        # no passphrase, mode 0600
     known_hosts: /etc/dymploy/targets/production.known_hosts     # the host key must be listed: no trust on first use
     upload_dir: dymploy-uploads     # relative to the login directory (default)
+    # secrets:                      # optional: where the secrets of definitions with `deploy.secrets: true` come from
+    #   command: [/usr/local/bin/mytool, secrets, get, --app, shop, --format, dotenv]
+    #   env_file: /etc/dymploy/mytool.env    # NAME=value lines for the command's environment, mode 0600
     allow:                          # who may deploy here: the same rule as `policy`
       - provider: github
         owner: globex

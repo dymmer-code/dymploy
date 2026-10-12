@@ -34,6 +34,7 @@ artifact:                   # optional; required when there is a deploy
 deploy:                     # optional; without it the job only builds
   target: production
   timeout: 10m
+  secrets: false            # true: the server puts the target's secrets on it for the steps
   steps: [{name, run, env}]
   check: {run, attempts, interval, timeout}
   after: {steps: […]}       # optional
@@ -84,6 +85,11 @@ Runs **on the target**, in order, as the user the target defines, with `sh -ec` 
 `env(1)` (no `AcceptEnv` needed). dymploy first uploads the artifact to the target's `upload_dir` and **verifies its
 sha256 on the target before running anything**; the upload is removed at the end.
 
+- **`secrets`** (default `false`): the deployment needs the target's secrets (database URLs, keys, tokens). The
+  definition says *that* it wants them, never *from where*: the source is configured on the server for the target
+  (see "Secrets" below). dymploy fetches them **before** touching the target, uploads them next to the artifact
+  (mode 0600, SHA-256 verified), gives the steps the path in `$DYMPLOY_SECRETS_FILE` and removes the file when the
+  deployment ends. If the source fails, nothing is changed on the target.
 - **`steps`** (at least one): `run`, `name` (unique), `env`. The first step that fails stops the deployment.
 - **`check`**: the health check after the steps: `attempts` (1–120, default 5), `interval` (1s–5m, default 3s) and a
   `timeout` per attempt (1s–10m, default 10s). If no attempt succeeds the deployment fails.
@@ -110,7 +116,7 @@ sha256 on the target before running anything**; the upload is removed at the end
 
 `DYMPLOY_COMMIT`, `DYMPLOY_SHORT_COMMIT`, `DYMPLOY_OWNER`, `DYMPLOY_REPO`, `DYMPLOY_BRANCH` or `DYMPLOY_TAG`,
 `DYMPLOY_JOB` in build and deploy; in the deploy also `DYMPLOY_TARGET`, `DYMPLOY_ARTIFACT` (path of the uploaded file, on
-the target) and `DYMPLOY_ARTIFACT_SHA256`. There are no templates inside the file: use the shell's expansion
+the target), `DYMPLOY_ARTIFACT_SHA256` and, with `deploy.secrets: true`, `DYMPLOY_SECRETS_FILE`. There are no templates inside the file: use the shell's expansion
 (`"$DYMPLOY_ARTIFACT"`).
 
 ## Targets (the server's configuration; they can be split across `config.d/*.yaml`)
@@ -127,6 +133,27 @@ targets:
     allow:                        # which repositories may deploy here (the same rules as `policy`)
       - {provider: github, owner: acme, repositories: [shop], branches: [main]}
 ```
+
+### Secrets
+
+A target can say where its secrets come from. `secrets` is a command whose standard output is the content of the
+file the steps receive; dymploy treats it as opaque bytes (up to 256 KiB of text), never logs it and never parses it.
+
+```yaml
+targets:
+  production:
+    # … host, user, key_file, known_hosts, allow …
+    secrets:
+      command: [/usr/local/bin/mytool, secrets, get, --app, shop, --format, dotenv]   # the program must be an absolute path
+      env_file: /etc/dymploy/mytool.env    # optional: NAME=value lines for the command's environment (a credential), not readable by others
+      timeout: 30s                         # default 30s, at most 5m
+```
+
+The command is run directly, with no shell, and a minimal environment (`PATH`, `HOME`, `LANG`, plus the variables of
+`env_file`): nothing else of the daemon's environment reaches it. The mapping lives here and not in `dymploy.yaml` so
+that a repository cannot name another application's secrets. A definition with `deploy.secrets: true` for a target
+without this block fails before building. What the steps do with the file is theirs to decide (install it where the
+service reads it, source it, …); it is removed from the upload directory when the deployment ends.
 
 A repository that asks for a target that does not exist, or that exists but is not granted to it, fails **before**
 building. A target whose files do not exist or cannot be used keeps the daemon from starting, and makes a `reload` be

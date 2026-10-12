@@ -9,6 +9,8 @@ package deploy
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -48,6 +50,21 @@ type Target struct {
 	KnownHosts string
 	UploadDir  string
 	Allow      webhook.Policy
+	// Secrets says where this target's secrets come from; nil when it has none.
+	Secrets *SecretsSpec
+}
+
+// SecretsSpec is how to obtain the secrets of a target.
+type SecretsSpec struct {
+	Command []string
+	EnvFile string
+	Timeout time.Duration
+}
+
+// SecretFetcher obtains secrets at deployment time. The bytes are opaque to dymploy: they are put on the
+// target for the steps to use, and are never logged.
+type SecretFetcher interface {
+	Fetch(ctx context.Context, spec SecretsSpec) ([]byte, error)
 }
 
 // Conn is an open connection to a target.
@@ -95,6 +112,21 @@ func (ts *Targets) Get(name string) (Target, bool) {
 type Deployer struct {
 	Remote  Remote
 	Targets *Targets
+	// Secrets fetches the secrets of definitions that ask for them (deploy.secrets).
+	Secrets SecretFetcher
+}
+
+// AuthorizeDeploy is Authorize for a whole definition: besides the target, the secrets it asks for must be
+// available for that target. It is checked before anything is built.
+func (d *Deployer) AuthorizeDeploy(def *manifest.Deploy, ev provider.Event) (Target, error) {
+	t, err := d.Authorize(def.Target, ev)
+	if err != nil {
+		return Target{}, err
+	}
+	if def.Secrets && (t.Secrets == nil || d.Secrets == nil) {
+		return Target{}, fmt.Errorf("deploy.secrets is set but target %q has no secrets source configured on this server", def.Target)
+	}
+	return t, nil
 }
 
 // Authorize says whether the event's repository may deploy to the named target. It is checked before
@@ -157,6 +189,18 @@ func (d *Deployer) Run(parent context.Context, r Request) (int, error) {
 	}
 
 	t := r.Target
+	// The secrets are fetched before touching the target: if their source fails, nothing has changed there.
+	var secrets []byte
+	if r.Deploy.Secrets {
+		if t.Secrets == nil || d.Secrets == nil {
+			return 0, fmt.Errorf("target %s has no secrets source configured", t.Name)
+		}
+		var err error
+		if secrets, err = d.Secrets.Fetch(ctx, *t.Secrets); err != nil {
+			return ended(fmt.Errorf("fetching the secrets for %s: %w", t.Name, err))
+		}
+		log.System(fmt.Sprintf("secrets fetched from the source of target %s (%d bytes, never logged)", t.Name, len(secrets)))
+	}
 	log.System(fmt.Sprintf("deploying to %s (%s@%s)", t.Name, t.User, t.Host))
 	conn, err := d.Remote.Dial(ctx, t)
 	if err != nil {
@@ -169,17 +213,33 @@ func (d *Deployer) Run(parent context.Context, r Request) (int, error) {
 		dir = DefaultUploadDir
 	}
 	remote := path.Join(dir, unsafe.ReplaceAllString(r.JobID, "-")+"-"+r.Record.File)
+	remoteSecrets := ""
+	if secrets != nil {
+		remoteSecrets = path.Join(dir, unsafe.ReplaceAllString(r.JobID, "-")+"-secrets")
+	}
 	defer func() { // best effort, also when ctx is over
 		cctx, c := context.WithTimeout(context.Background(), 20*time.Second)
 		defer c()
-		_, _ = conn.Run(cctx, "rm -f -- \"$DYMPLOY_ARTIFACT\"", map[string]string{"DYMPLOY_ARTIFACT": remote}, io.Discard, io.Discard)
+		for _, f := range []string{remote, remoteSecrets} {
+			if f != "" {
+				_, _ = conn.Run(cctx, "rm -f -- \"$DYMPLOY_ARTIFACT\"", map[string]string{"DYMPLOY_ARTIFACT": f}, io.Discard, io.Discard)
+			}
+		}
 	}()
 
 	if err := d.upload(ctx, conn, r, remote); err != nil {
 		return ended(err)
 	}
+	if secrets != nil {
+		if err := d.uploadSecrets(ctx, conn, log, secrets, remoteSecrets); err != nil {
+			return ended(err)
+		}
+	}
 
 	env := r.baseEnv(remote)
+	if remoteSecrets != "" {
+		env["DYMPLOY_SECRETS_FILE"] = remoteSecrets
+	}
 	n := len(r.Deploy.Steps)
 	for i, s := range r.Deploy.Steps {
 		name := stepName(s.Name, i)
@@ -258,6 +318,26 @@ func (d *Deployer) upload(ctx context.Context, conn Conn, r Request, remote stri
 		return errors.New("the file on the target does not match the artifact (SHA-256 differs): nothing was run")
 	}
 	log.System("upload verified: sha256 " + r.Record.SHA256)
+	return nil
+}
+
+// uploadSecrets puts the secrets on the target (mode 0600, as every upload) and checks that what arrived is
+// what was fetched. Only the size is logged.
+func (d *Deployer) uploadSecrets(ctx context.Context, conn Conn, log runner.Reporter, secrets []byte, remote string) error {
+	if err := conn.Upload(ctx, remote, bytes.NewReader(secrets)); err != nil {
+		return fmt.Errorf("uploading the secrets: %w", err)
+	}
+	var out, errb bytes.Buffer
+	code, err := conn.Run(ctx, "sha256sum -- \"$DYMPLOY_ARTIFACT\"", map[string]string{"DYMPLOY_ARTIFACT": remote}, &out, &errb)
+	if err != nil {
+		return fmt.Errorf("verifying the secrets upload: %w", err)
+	}
+	fields := strings.Fields(out.String())
+	sum := sha256.Sum256(secrets)
+	if code != 0 || len(fields) == 0 || fields[0] != hex.EncodeToString(sum[:]) {
+		return errors.New("the secrets file on the target does not match what was fetched: nothing was run")
+	}
+	log.System("secrets uploaded and verified (removed when the deployment ends)")
 	return nil
 }
 

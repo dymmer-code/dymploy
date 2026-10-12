@@ -64,13 +64,17 @@ func definition(t *testing.T, deployYAML string) *manifest.Deploy {
 }
 
 func (f *fx) run(ctx context.Context, d *manifest.Deploy) (int, error) {
+	return f.runWith(ctx, target(), d)
+}
+
+func (f *fx) runWith(ctx context.Context, tg deploy.Target, d *manifest.Deploy) (int, error) {
 	rep := runner.NewLineReporter(func(s runner.Stream, line string) {
 		f.mu.Lock()
 		f.logs = append(f.logs, string(s)+": "+line)
 		f.mu.Unlock()
 	})
 	defer rep.Close()
-	return f.d.Run(ctx, deploy.Request{Target: target(), Deploy: d, Event: ev, JobID: "job/1", Record: f.rec, File: f.file, Log: rep})
+	return f.d.Run(ctx, deploy.Request{Target: tg, Deploy: d, Event: ev, JobID: "job/1", Record: f.rec, File: f.file, Log: rep})
 }
 
 func (f *fx) log() string {

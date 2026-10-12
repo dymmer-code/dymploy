@@ -320,3 +320,18 @@ func TestSummary(t *testing.T) {
 		t.Fatalf("%q", s)
 	}
 }
+
+func TestDeploySecretsIsAnOptInBoolean(t *testing.T) {
+	m, err := Parse([]byte(minimal + "deploy:\n  target: production\n  secrets: true\n  steps: [{run: x}]\n"))
+	if err != nil || !m.Deploy.Secrets {
+		t.Fatalf("%v", err)
+	}
+	m, err = Parse([]byte(minimal + "deploy:\n  target: production\n  steps: [{run: x}]\n"))
+	if err != nil || m.Deploy.Secrets {
+		t.Fatalf("secrets are off unless asked for: %v", err)
+	}
+	// the definition can say THAT it wants secrets, never from where
+	if _, err := Parse([]byte(minimal + "deploy:\n  target: production\n  secrets: {project: other}\n  steps: [{run: x}]\n")); err == nil {
+		t.Fatal("a definition must not be able to name a secrets source")
+	}
+}

@@ -101,6 +101,7 @@
       "properties": {
         "target": {"type": "string", "pattern": "^[a-z][a-z0-9-]{0,62}$", "description": "The NAME of a target configured on the dymploy server."},
         "timeout": {"$ref": "#/$defs/duration", "description": "For the whole deploy. Default 10m, at most 1h."},
+        "secrets": {"type": "boolean", "default": false, "description": "Ask for the target's secrets. The server fetches them from the source it has configured for the target and uploads them next to the artifact (mode 0600); the path is in $DYMPLOY_SECRETS_FILE and the file is removed when the deploy ends. The definition never names the source."},
         "steps": {"type": "array", "minItems": 1, "maxItems": 100, "items": {"$ref": "#/$defs/deployStep"}},
         "check": {"$ref": "#/$defs/check"},
         "after": {"$ref": "#/$defs/stepList"}

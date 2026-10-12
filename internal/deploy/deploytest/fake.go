@@ -55,6 +55,13 @@ func (f *Fake) Dial(_ context.Context, t deploy.Target) (deploy.Conn, error) {
 	return &conn{f: f}, nil
 }
 
+// UploadedAt returns what is at a path of the fake target (nil if nothing is there).
+func (f *Fake) UploadedAt(p string) []byte {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.Files[p]
+}
+
 // Scripts returns the scripts run so far, except the housekeeping ones (verification, clean-up).
 func (f *Fake) Scripts() []string {
 	f.mu.Lock()
