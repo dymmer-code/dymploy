@@ -358,8 +358,10 @@ func TestAReloadThatRemovesARepositoryStopsItsJobsProperly(t *testing.T) {
 			t.Fatalf("%+v", a)
 		}
 	}
-	if q := r.jobs(t, "queued"); len(q) != 0 {
-		t.Fatalf("nothing of the removed repository stays in the queue: %+v", q)
+	for _, q := range r.jobs(t, "queued") { // the other repository's job may still be waiting for its turn
+		if q.Name == "github/acme/other" {
+			t.Fatalf("nothing of the removed repository stays in the queue: %+v", q)
+		}
 	}
 	// the one the policy still allows carries on
 	waitFor(t, func() bool { return len(r.jobs(t, "running")) == 1 })
