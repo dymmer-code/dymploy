@@ -16,6 +16,10 @@ type Params struct {
 	// could alter the git directories of its submodules and have the daemon run what it planted.
 	Depth      int  `json:"depth"`
 	Submodules bool `json:"submodules"`
+	// CacheScope says who shares a build cache: "repository" (the default) or "branch". With "branch" a
+	// build only reuses what builds of its own branch left, so a branch the policy trusts less cannot plant
+	// something in the cache that a more trusted one builds from.
+	CacheScope string `json:"cache_scope"`
 	// Limits are the most a build may use and what it gets when its definition says nothing. A
 	// definition that asks for more is refused. Unset values are 4g, 2 cpus and 1h.
 	Limits struct {
@@ -45,6 +49,13 @@ func ParseParams(raw json.RawMessage) (Params, error) {
 	}
 	if p.Submodules {
 		return Params{}, fmt.Errorf("the docker runner's params are invalid: submodules are not supported (a build could alter the git directories of its submodules)")
+	}
+	switch p.CacheScope {
+	case "":
+		p.CacheScope = ScopeRepository
+	case ScopeRepository, ScopeBranch:
+	default:
+		return Params{}, fmt.Errorf("the docker runner's params are invalid: cache_scope %q must be %q or %q", p.CacheScope, ScopeRepository, ScopeBranch)
 	}
 	if p.Limits.Memory == "" {
 		p.Limits.Memory = DefaultMemory

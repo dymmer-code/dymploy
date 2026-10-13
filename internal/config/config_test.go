@@ -238,6 +238,8 @@ func TestAppSettingsValidation(t *testing.T) {
 		"negative app id":             base + "    app_id: -1\n    private_key_file: /k\n",
 		"negative repo keep days":     "repo_keep_days: -1\n",
 		"negative artifact keep days": "artifact_keep_days: -1\n",
+		"negative cache keep days":    "cache_keep_days: -1\n",
+		"negative cache limit":        "cache_max_mb: -5\n",
 	} {
 		t.Run(name, func(t *testing.T) {
 			if _, err := Load(write(t, body)); err == nil {

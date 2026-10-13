@@ -225,6 +225,9 @@ runner:
       memory: 4g          # default 4g
       cpus: 2             # default 2
       timeout: 1h         # default 1h
+    cache_scope: repository   # who shares a build cache: "repository" (default) or "branch"
+cache_keep_days: 30       # caches not used for this long are removed; 0 keeps them
+cache_max_mb: 5120        # a cache that grows past this is emptied (the next build starts from nothing); 0 = no limit
 ```
 
 A definition that asks for more than these limits is refused (exit code 2, saying which limit); one that asks for less gets
@@ -232,7 +235,10 @@ less. Submodules are not supported by this runner.
 
 - The repository is mounted at `/work`; steps run with `sh -ec`, as the daemon's own uid:gid (so what they write
   can be read and cleaned up) with `HOME=/tmp`. Declare `build.cache` for anything that must survive between builds
-  (`<data_dir>/cache/<provider>/<owner>/<repo>/<name>`, mode 0700).
+  (`<data_dir>/cache/<provider>/<owner>/<repo>/<name>`, mode 0700). A cache is shared by every build of the repository unless
+  `cache_scope: branch`, which gives each branch its own: a branch the policy trusts less cannot plant something in the cache
+  that a more trusted one builds from. Caches are cleaned once an hour and at start: those not used for `cache_keep_days`
+  go, and so does one larger than `cache_max_mb` (a cache a build is using is never touched).
 - Containers are unprivileged: all capabilities dropped, `no-new-privileges`, bounded processes, no swap, no
   access to the Docker socket, no devices, no published ports. The `.git` directory is mounted **read-only** inside the
   build: the daemon runs git on the working copy afterwards, and a configuration or hook planted by a build would otherwise

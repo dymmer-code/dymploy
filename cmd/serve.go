@@ -63,7 +63,7 @@ func newServeCmd(version string) *cobra.Command {
 				return err
 			}
 			deployer := &deploy.Deployer{Remote: remote, Targets: targets, Secrets: secretcmd.New()}
-			mgr, repos, closeState, err := buildQueue(cfg, log, providers, deployer)
+			mgr, repos, dockerRunner, closeState, err := buildQueue(cfg, log, providers, deployer)
 			if err != nil {
 				return err
 			}
@@ -78,6 +78,9 @@ func newServeCmd(version string) *cobra.Command {
 				go cleanRepos(pruneCtx, repos, time.Duration(cfg.RepoKeepDays)*24*time.Hour, log)
 			}
 
+			if dockerRunner != nil && (cfg.CacheKeepDays > 0 || cfg.CacheMaxMB > 0) {
+				go cleanCaches(pruneCtx, dockerRunner, time.Duration(cfg.CacheKeepDays)*24*time.Hour, int64(cfg.CacheMaxMB)<<20, log)
+			}
 			if cfg.ArtifactKeepDays > 0 {
 				go cleanArtifacts(pruneCtx, filepath.Join(cfg.DataDir, "artifacts"), time.Duration(cfg.ArtifactKeepDays)*24*time.Hour, log)
 			}
@@ -118,12 +121,13 @@ func shutdownQueue(mgr *queue.Manager, timeout time.Duration) error {
 // buildQueue is the composition root for execution: it decides which runners exist, where state and
 // logs live, and returns the queue, the working-copy manager (nil when git is not available and no
 // job needs it) and a function that releases the state.
-func buildQueue(cfg *config.Config, log *slog.Logger, providers map[string]provider.Provider, deployer *deploy.Deployer) (*queue.Manager, *checkout.Manager, func(), error) {
+func buildQueue(cfg *config.Config, log *slog.Logger, providers map[string]provider.Provider, deployer *deploy.Deployer) (*queue.Manager, *checkout.Manager, *docker.Runner, func(), error) {
 	runners := runner.NewRegistry()
 	runners.MustRegister(dryrun.Kind, dryrun.New())
 	for _, add := range extraRunners {
 		add(runners)
 	}
+	var dockerRunner *docker.Runner
 	repos, err := checkout.New(checkout.Config{Root: filepath.Join(cfg.DataDir, "repos")})
 	switch {
 	case err == nil:
@@ -133,28 +137,32 @@ func buildQueue(cfg *config.Config, log *slog.Logger, providers map[string]provi
 		}
 		cl := clone.New(repos, finder)
 		runners.MustRegister(clone.Kind, cl)
-		if err := registerDocker(runners, cl, cfg, deployer); err != nil && cfg.Runner.Kind == docker.Kind {
-			return nil, nil, nil, fmt.Errorf("runner.kind %q: %w", docker.Kind, err)
-		} else if err != nil {
+		dr, err := registerDocker(runners, cl, cfg, deployer)
+		switch {
+		case err != nil && cfg.Runner.Kind == docker.Kind:
+			return nil, nil, nil, nil, fmt.Errorf("runner.kind %q: %w", docker.Kind, err)
+		case err != nil:
 			log.Warn("docker is not available: build jobs cannot run", "error", err)
+		default:
+			dockerRunner = dr
 		}
 	case cfg.Runner.Kind == clone.Kind || cfg.Runner.Kind == docker.Kind:
-		return nil, nil, nil, fmt.Errorf("runner.kind %q needs git: %w", cfg.Runner.Kind, err)
+		return nil, nil, nil, nil, fmt.Errorf("runner.kind %q needs git: %w", cfg.Runner.Kind, err)
 	default:
 		log.Warn("git is not available: jobs that clone repositories cannot run", "error", err)
 		repos = nil
 	}
 	if _, err := runners.Get(cfg.Runner.Kind); err != nil {
-		return nil, nil, nil, fmt.Errorf("runner.kind: %w (available: %s)", err, strings.Join(runners.Kinds(), ", "))
+		return nil, nil, nil, nil, fmt.Errorf("runner.kind: %w (available: %s)", err, strings.Join(runners.Kinds(), ", "))
 	}
 	store, err := job.OpenBolt(filepath.Join(cfg.DataDir, "state", "jobs.db"))
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, nil, err
 	}
 	logs, err := job.NewFileLogs(filepath.Join(cfg.DataDir, "logs"), cfg.Queue.LogMaxBytes)
 	if err != nil {
 		store.Close()
-		return nil, nil, nil, err
+		return nil, nil, nil, nil, err
 	}
 	var observer func(queue.Event)
 	if rep := newStatusReporter(cfg, providers, log); rep != nil {
@@ -167,9 +175,9 @@ func buildQueue(cfg *config.Config, log *slog.Logger, providers map[string]provi
 	}, queue.Deps{Store: store, Logs: logs, Runners: runners, Log: log, Observer: observer})
 	if err != nil {
 		store.Close()
-		return nil, nil, nil, err
+		return nil, nil, nil, nil, err
 	}
-	return mgr, repos, func() { store.Close() }, nil
+	return mgr, repos, dockerRunner, func() { store.Close() }, nil
 }
 
 // minTokenLength keeps the API token out of guessing range.
@@ -236,13 +244,13 @@ func rulesOf(in []config.PolicyRule) []webhook.Rule {
 
 // registerDocker adds the build runner, which needs the docker command and works on top of the clone
 // runner's checkouts. The engine itself is only contacted when a job runs.
-func registerDocker(runners *runner.Registry, cl *clone.Runner, cfg *config.Config, deployer *deploy.Deployer) error {
+func registerDocker(runners *runner.Registry, cl *clone.Runner, cfg *config.Config, deployer *deploy.Deployer) (*docker.Runner, error) {
 	if _, err := docker.ParseParams(cfg.Runner.ParamsJSON()); err != nil && cfg.Runner.Kind == docker.Kind {
-		return err
+		return nil, err
 	}
 	engine, err := docker.NewCLI("")
 	if err != nil {
-		return err
+		return nil, err
 	}
 	source := func(ctx context.Context, t runner.Task) (string, func(), provider.Event, error) {
 		co, ev, err := cl.Prepare(ctx, t)
@@ -257,10 +265,10 @@ func registerDocker(runners *runner.Registry, cl *clone.Runner, cfg *config.Conf
 		User: strconv.Itoa(os.Getuid()) + ":" + strconv.Itoa(os.Getgid()),
 	})
 	if err != nil {
-		return err
+		return nil, err
 	}
 	runners.MustRegister(docker.Kind, run)
-	return nil
+	return run, nil
 }
 
 // cleanArtifacts removes the artifacts of old builds, once an hour.
@@ -275,6 +283,21 @@ func cleanArtifactsOnce(dir string, olderThan time.Duration, log *slog.Logger) {
 	case n > 0:
 		log.Info("old artifacts removed", "removed", n)
 	}
+}
+
+// cleanCaches removes the build caches nobody uses any more, or that grew too much, once an hour (and once
+// at start, which is when a long-stopped server catches up).
+func cleanCaches(ctx context.Context, r *docker.Runner, olderThan time.Duration, maxBytes int64, log *slog.Logger) {
+	once := func() {
+		switch rep, err := r.CleanCaches(olderThan, maxBytes); {
+		case err != nil:
+			log.Warn("cleaning build caches failed", "error", err)
+		case rep.Expired+rep.OverLimit > 0:
+			log.Info("build caches removed", "unused", rep.Expired, "over the limit", rep.OverLimit)
+		}
+	}
+	once()
+	runEvery(ctx, time.Hour, once)
 }
 
 // cleanRepos removes working copies nobody has used for a while, once an hour.

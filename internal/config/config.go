@@ -50,6 +50,11 @@ type Config struct {
 	RepoKeepDays int `yaml:"repo_keep_days"`
 	// ArtifactKeepDays removes the artifacts of builds older than this many days; 0 keeps them.
 	ArtifactKeepDays int `yaml:"artifact_keep_days"`
+	// CacheKeepDays removes build caches (the `build.cache` directories kept between builds) not used for this
+	// many days; 0 keeps them. CacheMaxMB empties a cache that grows past this size in MiB, so the next build
+	// starts from nothing; 0 means no limit. Without them a build can make a cache grow without bound.
+	CacheKeepDays int `yaml:"cache_keep_days"`
+	CacheMaxMB    int `yaml:"cache_max_mb"`
 }
 
 // QueueConfig sets the limits of the job queue.
@@ -185,6 +190,8 @@ func Default() *Config {
 		ShutdownTimeout:  2 * time.Minute,
 		RepoKeepDays:     14,
 		ArtifactKeepDays: 14,
+		CacheKeepDays:    30,
+		CacheMaxMB:       5120,
 		Queue:            QueueConfig{StopGrace: 30 * time.Second, MaxConcurrent: 2, MaxPending: 1000, OnBusy: "queue", LogMaxBytes: 10 << 20, KeepJobs: 500, KeepDays: 30},
 		Runner:           RunnerConfig{Kind: "dryrun"},
 	}
@@ -237,8 +244,8 @@ func (c *Config) Validate() error {
 	if c.ShutdownTimeout < time.Second || c.Queue.StopGrace < 0 {
 		return errors.New("shutdown_timeout must be at least 1s (for example 2m) and queue.stop_grace must not be negative")
 	}
-	if c.RepoKeepDays < 0 || c.ArtifactKeepDays < 0 {
-		return errors.New("repo_keep_days and artifact_keep_days must not be negative")
+	if c.RepoKeepDays < 0 || c.ArtifactKeepDays < 0 || c.CacheKeepDays < 0 || c.CacheMaxMB < 0 {
+		return errors.New("repo_keep_days, artifact_keep_days, cache_keep_days and cache_max_mb must not be negative")
 	}
 	if c.WebhookMaxBody < 0 || c.WebhookRatePerMinute < 0 {
 		return errors.New("webhook_max_body_bytes and webhook_rate_per_minute must not be negative")

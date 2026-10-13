@@ -60,7 +60,10 @@ type Config struct {
 }
 
 // Runner implements runner.Runner.
-type Runner struct{ cfg Config }
+type Runner struct {
+	cfg    Config
+	caches cacheStore
+}
 
 // New returns a Docker runner.
 func New(cfg Config) (*Runner, error) {
@@ -132,7 +135,7 @@ func (r *Runner) Run(ctx context.Context, t runner.Task) (runner.Result, error) 
 		return runner.Result{ExitCode: ExitBadManifest}, nil
 	}
 
-	b := &build{r: r, t: t, m: m, ev: ev, dir: dir, id: safe(t.JobID), limits: limits}
+	b := &build{r: r, t: t, m: m, ev: ev, dir: dir, id: safe(t.JobID), limits: limits, cacheScope: params.CacheScope}
 	if b.id == "" {
 		return runner.Result{}, errors.New("the task has no usable job id")
 	}
@@ -181,7 +184,8 @@ type build struct {
 	dir string
 	id  string
 
-	limits effective
+	limits     effective
+	cacheScope string // ScopeRepository or ScopeBranch
 }
 
 func (b *build) env() map[string]string {
@@ -234,10 +238,11 @@ func (b *build) run(ctx context.Context) (runner.Result, error) {
 		}()
 	}
 
-	caches, err := b.cacheMounts()
+	caches, releaseCaches, err := b.cacheMounts()
 	if err != nil {
 		return runner.Result{}, err
 	}
+	defer releaseCaches()
 	pulled := map[string]bool{}
 	for i, s := range b.m.Build.Steps {
 		img := image
@@ -340,17 +345,24 @@ func (b *build) inside(rel string) (string, error) {
 
 type cacheMount struct{ host, container string }
 
-func (b *build) cacheMounts() ([]cacheMount, error) {
-	var out []cacheMount
+func (b *build) cacheMounts() ([]cacheMount, func(), error) {
 	base := filepath.Join(b.r.cfg.CacheDir, safe(b.ev.Provider), safe(b.ev.Owner), safe(b.ev.Repo))
-	for _, c := range b.m.Build.Cache {
-		host := filepath.Join(base, c.Name)
-		if err := os.MkdirAll(host, 0o700); err != nil {
-			return nil, fmt.Errorf("creating cache %s: %w", c.Name, err)
-		}
-		out = append(out, cacheMount{host, c.Path})
+	if sc := scopeDir(b.cacheScope, b.ev.Branch, b.ev.Tag); sc != "" {
+		base = filepath.Join(base, sc)
 	}
-	return out, nil
+	names := make([]string, len(b.m.Build.Cache))
+	for i, c := range b.m.Build.Cache {
+		names[i] = c.Name
+	}
+	dirs, release, err := b.r.caches.acquire(base, names)
+	if err != nil {
+		return nil, nil, err
+	}
+	out := make([]cacheMount, len(dirs))
+	for i, c := range b.m.Build.Cache {
+		out[i] = cacheMount{dirs[i], c.Path}
+	}
+	return out, release, nil
 }
 
 // step runs one build step and returns its exit code.
