@@ -82,7 +82,7 @@ func newServeCmd(version string) *cobra.Command {
 				go cleanArtifacts(pruneCtx, filepath.Join(cfg.DataDir, "artifacts"), time.Duration(cfg.ArtifactKeepDays)*24*time.Hour, log)
 			}
 
-			enq := intake.New(mgr, cfg.Runner.Kind, cfg.Runner.ParamsJSON())
+			enq := intake.New(mgr, cfg.Runner.Kind, cfg.Runner.ParamsJSON()).Fresh(tipCheck(cfg, providers, log))
 			hooks := buildReceiver(cfg, log, providers, enq)
 			jobs := queueJobs{m: mgr, log: log, providers: providers, hooks: hooks, enq: enq}
 			rl := &reloader{path: configPath, cur: cfg, hooks: hooks, remote: remote, targets: targets, mgr: mgr, log: log}
@@ -348,6 +348,29 @@ func buildProviders(cfg *config.Config) (map[string]provider.Provider, error) {
 		}
 	}
 	return providers, nil
+}
+
+// tipCheck builds the check that a push is not stale. The setting is read from the configuration in force
+// when the daemon started; changing it needs a restart, like every setting a reload does not apply. A
+// provider that cannot be asked (on GitHub, no App configured) is not checked, and the log says so.
+func tipCheck(cfg *config.Config, providers map[string]provider.Provider, log *slog.Logger) func(context.Context, provider.Event) error {
+	find := func(name string) (provider.Resolver, bool) {
+		r, ok := providers[name].(provider.Resolver)
+		if !ok {
+			return nil, false
+		}
+		if rd, ok := providers[name].(provider.Readier); ok && !rd.Ready() {
+			return nil, false
+		}
+		return r, true
+	}
+	for name, w := range cfg.Webhooks {
+		if _, ok := find(name); !ok && w.VerifiesTip() {
+			log.Warn("deliveries of this provider cannot be checked against it, so a replayed one would not be detected (configure its App)", "provider", name)
+		}
+	}
+	enabled := func(name string) bool { return cfg.Webhooks[name].VerifiesTip() }
+	return intake.Tip(find, enabled)
 }
 
 // buildReceiver assembles the webhook receiver; it returns nil when no webhooks are configured.

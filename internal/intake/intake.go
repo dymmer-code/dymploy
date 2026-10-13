@@ -7,6 +7,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"time"
 
 	"github.com/dymmer-code/dymploy/internal/job"
 	"github.com/dymmer-code/dymploy/internal/provider"
@@ -24,6 +26,45 @@ type Enqueuer struct {
 	sub    Submitter
 	kind   string
 	params json.RawMessage
+	fresh  func(ctx context.Context, ev provider.Event) error
+}
+
+// Fresh makes Enqueue check each event with fn before it is queued; an error stops it. Submit, which is
+// how a person starts a job by hand, is never checked: that person chose the commit.
+func (e *Enqueuer) Fresh(fn func(ctx context.Context, ev provider.Event) error) *Enqueuer {
+	e.fresh = fn
+	return e
+}
+
+// tipTimeout bounds the question to the provider so a slow answer cannot hold a webhook open.
+const tipTimeout = 10 * time.Second
+
+// Tip returns a check that an event's commit is still where its branch or tag points. A webhook is signed,
+// but a signature proves who sent it, not when: a captured delivery can be sent again, and deliveries can
+// arrive out of order, so asking the provider is the only way to know the event is still current.
+// enabled says, per provider, whether to check at all; find returns the provider's resolver, if it has one.
+func Tip(find func(name string) (provider.Resolver, bool), enabled func(name string) bool) func(ctx context.Context, ev provider.Event) error {
+	return func(ctx context.Context, ev provider.Event) error {
+		if ev.Ref == "" || !enabled(ev.Provider) {
+			return nil
+		}
+		res, ok := find(ev.Provider)
+		if !ok {
+			return nil // this provider cannot say where a ref points: there is nothing to compare with
+		}
+		ctx, cancel := context.WithTimeout(ctx, tipTimeout)
+		defer cancel()
+		cur, err := res.ResolveRef(ctx, ev.Owner, ev.Repo, ev.Ref)
+		switch {
+		case errors.Is(err, provider.ErrRefNotFound):
+			return fmt.Errorf("%w: %s no longer exists", webhook.ErrStale, ev.Ref)
+		case err != nil:
+			return fmt.Errorf("%w: %v", webhook.ErrCannotVerify, err)
+		case cur.Commit != ev.Commit:
+			return fmt.Errorf("%w: %s points at %.12s now", webhook.ErrStale, ev.Ref, cur.Commit)
+		}
+		return nil
+	}
 }
 
 // New returns an Enqueuer that submits jobs of the given runner kind. params are the runner's
@@ -35,6 +76,11 @@ func New(sub Submitter, kind string, params json.RawMessage) *Enqueuer {
 // Enqueue implements webhook.Enqueuer. Jobs are named after the repository, so two pushes to the
 // same repository never run at the same time. The whole event travels as the job's opaque input.
 func (e *Enqueuer) Enqueue(ctx context.Context, ev provider.Event) error {
+	if e.fresh != nil {
+		if err := e.fresh(ctx, ev); err != nil {
+			return err
+		}
+	}
 	_, err := e.Submit(ctx, ev)
 	switch {
 	case errors.Is(err, queue.ErrQueueFull):

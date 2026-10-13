@@ -218,6 +218,35 @@ func TestDroppedByPolicyIs200AndNotRetried(t *testing.T) {
 	}
 }
 
+func TestAStaleDeliveryIs200AndIsNotRetriedNorQueued(t *testing.T) {
+	f := newFixture(t)
+	f.q.err = ErrStale
+	w := f.postFake(fakeBody("s1", "refs/heads/main"))
+	if w.Code != 200 || status(t, w) != "stale" {
+		t.Fatalf("%d %s", w.Code, w.Body)
+	}
+	f.q.err = nil
+	if w := f.postFake(fakeBody("s1", "refs/heads/main")); w.Code != 200 || status(t, w) != "duplicate" {
+		t.Fatalf("a stale delivery stays seen, so sending it again changes nothing: %d %s", w.Code, w.Body)
+	}
+	if f.q.count() != 0 {
+		t.Fatal("a stale event reached the queue")
+	}
+}
+
+func TestWhenTheTipCannotBeVerifiedIs503AndTheRetryIsAccepted(t *testing.T) {
+	f := newFixture(t)
+	f.q.err = ErrCannotVerify
+	w := f.postFake(fakeBody("v1", "refs/heads/main"))
+	if w.Code != 503 || w.Header().Get("Retry-After") == "" || status(t, w) != "could not verify" {
+		t.Fatalf("%d %s %v", w.Code, w.Body, w.Header())
+	}
+	f.q.err = nil
+	if w := f.postFake(fakeBody("v1", "refs/heads/main")); w.Code != 202 {
+		t.Fatalf("an unverified delivery is released so it can be sent again: %d", w.Code)
+	}
+}
+
 func TestOtherQueueErrorsAre500(t *testing.T) {
 	f := newFixture(t)
 	f.q.err = errors.New("disk on fire")

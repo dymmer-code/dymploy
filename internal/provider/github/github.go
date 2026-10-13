@@ -35,6 +35,9 @@ func New(webhookSecret string) (*Provider, error) {
 // Name implements provider.Provider.
 func (*Provider) Name() string { return "github" }
 
+// Ready implements provider.Readier: asking GitHub anything needs the App.
+func (p *Provider) Ready() bool { return p.app != nil }
+
 type pushPayload struct {
 	Ref        string `json:"ref"`
 	After      string `json:"after"`

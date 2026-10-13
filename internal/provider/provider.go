@@ -93,6 +93,12 @@ type Resolver interface {
 	ResolveRef(ctx context.Context, owner, repo, ref string) (*Event, error)
 }
 
+// Readier is implemented by providers whose optional capabilities (resolving a ref, publishing a status)
+// need configuration to work. Ready says whether they can be used (on GitHub, whether the App is set up).
+type Readier interface {
+	Ready() bool
+}
+
 // StatusPublisher is implemented by providers that can show a job's state on the commit.
 type StatusPublisher interface {
 	PublishStatus(ctx context.Context, ev *Event, state State, description, targetURL string) error

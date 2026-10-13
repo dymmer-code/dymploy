@@ -8,6 +8,7 @@ import (
 
 	"github.com/dymmer-code/dymploy/internal/job"
 	"github.com/dymmer-code/dymploy/internal/provider"
+	fakeprovider "github.com/dymmer-code/dymploy/internal/provider/fake"
 	"github.com/dymmer-code/dymploy/internal/queue"
 	"github.com/dymmer-code/dymploy/internal/webhook"
 )
@@ -79,5 +80,84 @@ func TestAStoppingQueueIsTranslatedForTheWebhookLayer(t *testing.T) {
 		if got := New(s, "docker", nil).Enqueue(context.Background(), ev); !errors.Is(got, webhook.ErrShuttingDown) {
 			t.Errorf("%v → %v", err, got)
 		}
+	}
+}
+
+// --- the commit must still be the tip ---
+
+type resolver struct {
+	fake *fakeprovider.Provider
+	err  error
+}
+
+func (r resolver) ResolveRef(ctx context.Context, owner, repo, ref string) (*provider.Event, error) {
+	if r.err != nil {
+		return nil, r.err
+	}
+	return r.fake.ResolveRef(ctx, owner, repo, ref)
+}
+
+func tipOf(refs map[string]string, err error, on bool) func(context.Context, provider.Event) error {
+	r := resolver{fake: fakeprovider.New("t").WithRefs(refs), err: err}
+	return Tip(func(string) (provider.Resolver, bool) { return r, true }, func(string) bool { return on })
+}
+
+var pushed = provider.Event{Provider: "fake", Owner: "acme", Repo: "shop", FullName: "acme/shop", Ref: "refs/heads/main", Branch: "main", Commit: "c2"}
+
+func TestACurrentPushIsQueuedAndAStaleOneIsNot(t *testing.T) {
+	s := &submitter{}
+	e := New(s, "k", nil).Fresh(tipOf(map[string]string{"acme/shop:refs/heads/main": "c2"}, nil, true))
+	if err := e.Enqueue(context.Background(), pushed); err != nil || s.got.Name == "" {
+		t.Fatalf("the tip itself must pass: %v", err)
+	}
+
+	s = &submitter{}
+	e = New(s, "k", nil).Fresh(tipOf(map[string]string{"acme/shop:refs/heads/main": "c3"}, nil, true))
+	err := e.Enqueue(context.Background(), pushed)
+	if !errors.Is(err, webhook.ErrStale) {
+		t.Fatalf("an old commit must be stale: %v", err)
+	}
+	if s.got.Name != "" {
+		t.Fatal("a stale event must not reach the queue")
+	}
+}
+
+func TestADeletedRefIsStaleAndTagsAreChecked(t *testing.T) {
+	e := New(&submitter{}, "k", nil).Fresh(tipOf(map[string]string{}, nil, true))
+	if err := e.Enqueue(context.Background(), pushed); !errors.Is(err, webhook.ErrStale) {
+		t.Fatalf("the branch is gone: %v", err)
+	}
+	tag := pushed
+	tag.Ref, tag.Branch, tag.Tag = "refs/tags/v1", "", "v1"
+	moved := New(&submitter{}, "k", nil).Fresh(tipOf(map[string]string{"acme/shop:refs/tags/v1": "other"}, nil, true))
+	if err := moved.Enqueue(context.Background(), tag); !errors.Is(err, webhook.ErrStale) {
+		t.Fatalf("a moved tag is stale too: %v", err)
+	}
+}
+
+func TestIfTheProviderCannotAnswerNothingIsQueued(t *testing.T) {
+	s := &submitter{}
+	e := New(s, "k", nil).Fresh(tipOf(nil, errors.New("api down"), true))
+	if err := e.Enqueue(context.Background(), pushed); !errors.Is(err, webhook.ErrCannotVerify) {
+		t.Fatalf("an unanswered check must not let the event through: %v", err)
+	}
+	if s.got.Name != "" {
+		t.Fatal("it was queued")
+	}
+}
+
+func TestTheCheckCanBeSwitchedOffAndNeverAppliesToAPersonSubmitting(t *testing.T) {
+	stale := tipOf(map[string]string{"acme/shop:refs/heads/main": "c3"}, nil, false)
+	if err := New(&submitter{}, "k", nil).Fresh(stale).Enqueue(context.Background(), pushed); err != nil {
+		t.Fatalf("switched off for this provider: %v", err)
+	}
+	on := tipOf(map[string]string{"acme/shop:refs/heads/main": "c3"}, nil, true)
+	if _, err := New(&submitter{}, "k", nil).Fresh(on).Submit(context.Background(), pushed); err != nil {
+		t.Fatalf("a person starting a job by hand chose that commit: %v", err)
+	}
+	// a provider that cannot resolve refs has nothing to compare: the event passes
+	noResolver := Tip(func(string) (provider.Resolver, bool) { return nil, false }, func(string) bool { return true })
+	if err := noResolver(context.Background(), pushed); err != nil {
+		t.Fatal(err)
 	}
 }

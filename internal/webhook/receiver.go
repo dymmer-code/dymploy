@@ -21,6 +21,14 @@ var ErrQueueFull = errors.New("queue full")
 // should try again later: the answer is 503 with a message that says why.
 var ErrShuttingDown = errors.New("dymploy is shutting down")
 
+// ErrStale is what the enqueuer returns when the event's commit is no longer where its branch or tag
+// points: a delivery that arrives late, out of order or replayed must not build old code.
+var ErrStale = errors.New("the commit is no longer the tip of its branch or tag")
+
+// ErrCannotVerify is returned when the check above could not be made (the provider did not answer). The
+// event is not queued; the provider can deliver it again.
+var ErrCannotVerify = errors.New("could not verify that the commit is still the tip")
+
 // ErrDropped is what a queue returns when its policy discards the job on purpose. It is not an
 // error for the sender: retrying would be refused again.
 var ErrDropped = errors.New("dropped by the queue policy")
@@ -143,6 +151,15 @@ func (rc *Receiver) serve(w http.ResponseWriter, r *http.Request) {
 		rc.Dedupe.Release(ev.Provider, ev.DeliveryID)
 		reply(w, http.StatusOK, "dropped")
 		log.Info("webhook dropped", "reason", "queue policy")
+	case errors.Is(err, ErrStale):
+		// Answered 200 and kept as seen: it is not a failure of the sender and it must not be retried.
+		reply(w, http.StatusOK, "stale")
+		log.Info("webhook ignored", "why", "the commit is not the tip any more", "commit", short(ev.Commit))
+	case errors.Is(err, ErrCannotVerify):
+		rc.Dedupe.Release(ev.Provider, ev.DeliveryID)
+		w.Header().Set("Retry-After", "30")
+		reply(w, http.StatusServiceUnavailable, "could not verify")
+		log.Warn("webhook not queued", "reason", "could not verify the tip", "error", err)
 	case err != nil:
 		rc.Dedupe.Release(ev.Provider, ev.DeliveryID)
 		reply(w, http.StatusInternalServerError, "error")

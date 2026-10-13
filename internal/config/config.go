@@ -109,7 +109,14 @@ type WebhookConfig struct {
 	// tick or the red cross). It needs the App, and the App needs the commit-status permission accepted by
 	// each installation.
 	ReportStatus bool `yaml:"report_status"`
+	// VerifyTip asks the provider, before queueing a push, whether its commit is still where the branch or
+	// tag points, and ignores it if not (a late, out-of-order or replayed delivery). On by default; it needs
+	// the provider to be able to answer (on GitHub, the App).
+	VerifyTip *bool `yaml:"verify_tip"`
 }
+
+// VerifiesTip reports whether pushes of this provider are checked against the provider (default: yes).
+func (w WebhookConfig) VerifiesTip() bool { return w.VerifyTip == nil || *w.VerifyTip }
 
 // APIConfig configures the read-only API of the public listener, under /api/v1/.
 type APIConfig struct {

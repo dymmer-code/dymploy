@@ -78,9 +78,24 @@ webhook_max_body_bytes: 5242880    # default 5 MiB
 webhook_rate_per_minute: 600       # default 600, 0 disables
 ```
 
-Answers: `202` accepted · `200` ignored (ping, other events, deleted refs) or duplicate delivery ·
+Answers: `202` accepted · `200` ignored (ping, other events, deleted refs), duplicate delivery or stale commit ·
 `400` malformed · `401` not authenticated · `403` outside the policy · `405` not POST · `413` too large ·
-`429` rate limited · `503` queue full (retry).
+`429` rate limited · `503` queue full, or the provider could not be asked (retry).
+
+### Late, out-of-order and replayed deliveries
+
+A signature proves who sent a webhook, not when. A captured delivery can be sent again later, and deliveries can arrive out of
+order. So, before queueing a push, dymploy asks the provider where the branch or tag points now and **ignores the event when
+its commit is no longer the tip** (`200 stale`; a deleted branch counts too). If the provider cannot be asked, nothing is queued
+(`503`, so it can be delivered again). A person starting a job by hand with `dymploy queue` chose the commit, so that is never
+checked. It is on by default and needs the provider to be able to answer (on GitHub, the App); a provider that cannot is not
+checked, and the log says so at start. To switch it off for one provider:
+
+```yaml
+webhooks:
+  github:
+    verify_tip: false
+```
 
 ## Trying a definition without pushing anything
 
