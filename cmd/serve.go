@@ -402,12 +402,14 @@ func buildReceiver(cfg *config.Config, log *slog.Logger, providers map[string]pr
 		return nil
 	}
 	return &webhook.Receiver{
-		Providers: providers,
-		Policy:    policyRules(cfg),
-		Queue:     q,
-		Dedupe:    webhook.NewDedupe(24*time.Hour, 10000),
-		Limiter:   webhook.NewLimiter(cfg.WebhookRatePerMinute, time.Minute),
-		MaxBody:   cfg.WebhookMaxBody,
-		Log:       log,
+		Providers:      providers,
+		Policy:         policyRules(cfg),
+		Queue:          q,
+		Dedupe:         webhook.NewDedupe(24*time.Hour, 10000),
+		Limiter:        webhook.NewLimiter(cfg.WebhookRatePerMinute, time.Minute),
+		IPLimiter:      webhook.NewIPLimiter(cfg.WebhookRatePerIPPerMinute, time.Minute),
+		TrustedProxies: cfg.TrustedPrefixes(),
+		MaxBody:        cfg.WebhookMaxBody,
+		Log:            log,
 	}
 }

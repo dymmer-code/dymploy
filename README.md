@@ -76,7 +76,14 @@ policy:
     installations: [123456]    # optional: only events from these installations
 webhook_max_body_bytes: 5242880    # default 5 MiB
 webhook_rate_per_minute: 600       # default 600, 0 disables
+webhook_rate_per_ip_per_minute: 60 # default 60, 0 disables: each client address has its own budget
+trusted_proxies: [192.0.2.10/32]   # reverse proxies whose X-Forwarded-For is believed (empty: the connection's address)
 ```
+
+The per-address limit is checked **before** the shared one counts anything, so a single address cannot use up the budget
+everybody else shares. Behind a reverse proxy every connection comes from the proxy, so list it in `trusted_proxies`: only then
+is `X-Forwarded-For` read (from the right, skipping the proxies) to know the real client, for the limit and for the logs.
+Anyone else writing that header is ignored.
 
 Answers: `202` accepted · `200` ignored (ping, other events, deleted refs), duplicate delivery or stale commit ·
 `400` malformed · `401` not authenticated · `403` outside the policy · `405` not POST · `413` too large ·

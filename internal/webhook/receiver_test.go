@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"strings"
 	"sync"
 	"testing"
@@ -253,6 +254,39 @@ func TestOtherQueueErrorsAre500(t *testing.T) {
 	w := f.postFake(fakeBody("d1", "refs/heads/main"))
 	if w.Code != 500 || strings.Contains(w.Body.String(), "disk") {
 		t.Fatalf("%d %s", w.Code, w.Body)
+	}
+}
+
+func TestOneAddressCannotUseUpWhatEverybodySharesAndTheProxyHeaderIsOnlyBelievedFromTheProxy(t *testing.T) {
+	f := newFixture(t)
+	f.rc.IPLimiter = NewIPLimiter(2, time.Minute)
+	f.rc.Limiter = NewLimiter(100, time.Minute)
+	f.rc.TrustedProxies = []netip.Prefix{netip.MustParsePrefix("192.0.2.1/32")}
+	send := func(remote, xff string) int {
+		r := httptest.NewRequest("POST", "/hooks/fake", strings.NewReader(fakeBody("x", "refs/heads/main")))
+		r.RemoteAddr = remote
+		if xff != "" {
+			r.Header.Set("X-Forwarded-For", xff)
+		}
+		r.Header.Set("X-Fake-Token", "t")
+		w := httptest.NewRecorder()
+		f.rc.Handler().ServeHTTP(w, r)
+		return w.Code
+	}
+	// a flood from one real client, seen through the proxy
+	send("192.0.2.1:1", "203.0.113.9")
+	send("192.0.2.1:2", "203.0.113.9")
+	if code := send("192.0.2.1:3", "203.0.113.9"); code != 429 {
+		t.Fatalf("the flooder is limited: %d", code)
+	}
+	if code := send("192.0.2.1:4", "198.51.100.7"); code == 429 {
+		t.Fatal("another client behind the same proxy is not affected")
+	}
+	// somebody who is not the proxy cannot claim to be another address
+	send("203.0.113.50:1", "198.51.100.7")
+	send("203.0.113.50:2", "198.51.100.7")
+	if code := send("203.0.113.50:3", "198.51.100.200"); code != 429 {
+		t.Fatalf("a forged X-Forwarded-For must not give a fresh budget: %d", code)
 	}
 }
 

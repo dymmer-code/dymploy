@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/netip"
 	"path"
 	"path/filepath"
 	"regexp"
@@ -37,6 +38,13 @@ type Config struct {
 	API APIConfig `yaml:"api"`
 	// WebhookMaxBody is the largest accepted webhook body, in bytes.
 	WebhookMaxBody int64 `yaml:"webhook_max_body_bytes"`
+	// TrustedProxies are the addresses (CIDR) of the reverse proxies in front of dymploy. Only requests that
+	// come from them have their X-Forwarded-For believed, so the real address of a client is known (for the
+	// per-address limit and the logs). Without any, the address of the connection is used.
+	TrustedProxies []string `yaml:"trusted_proxies"`
+	// WebhookRatePerIPPerMinute limits webhook requests per minute from each client address, before the
+	// shared limit below counts anything; 0 disables it.
+	WebhookRatePerIPPerMinute int `yaml:"webhook_rate_per_ip_per_minute"`
 	// WebhookRatePerMinute limits webhook requests per minute across all providers; 0 disables it.
 	WebhookRatePerMinute int `yaml:"webhook_rate_per_minute"`
 
@@ -184,8 +192,9 @@ func Default() *Config {
 		ControlSocket: "/run/dymploy/control.sock",
 		DataDir:       "/var/lib/dymploy",
 
-		WebhookMaxBody:       5 << 20,
-		WebhookRatePerMinute: 600,
+		WebhookMaxBody:            5 << 20,
+		WebhookRatePerMinute:      600,
+		WebhookRatePerIPPerMinute: 60,
 
 		ShutdownTimeout:  2 * time.Minute,
 		RepoKeepDays:     14,
@@ -247,8 +256,15 @@ func (c *Config) Validate() error {
 	if c.RepoKeepDays < 0 || c.ArtifactKeepDays < 0 || c.CacheKeepDays < 0 || c.CacheMaxMB < 0 {
 		return errors.New("repo_keep_days, artifact_keep_days, cache_keep_days and cache_max_mb must not be negative")
 	}
-	if c.WebhookMaxBody < 0 || c.WebhookRatePerMinute < 0 {
-		return errors.New("webhook_max_body_bytes and webhook_rate_per_minute must not be negative")
+	if c.WebhookMaxBody < 0 || c.WebhookRatePerMinute < 0 || c.WebhookRatePerIPPerMinute < 0 {
+		return errors.New("webhook_max_body_bytes, webhook_rate_per_minute and webhook_rate_per_ip_per_minute must not be negative")
+	}
+	for _, p := range c.TrustedProxies {
+		if _, err := netip.ParsePrefix(p); err != nil {
+			if _, err := netip.ParseAddr(p); err != nil {
+				return fmt.Errorf("trusted_proxies: %q is not an address or a CIDR range", p)
+			}
+		}
 	}
 	if err := c.Queue.validate(); err != nil {
 		return err
@@ -409,4 +425,17 @@ func (r PolicyRule) validate(webhooks map[string]WebhookConfig) error {
 		}
 	}
 	return nil
+}
+
+// TrustedPrefixes returns trusted_proxies as prefixes (a single address is a /32 or /128).
+func (c *Config) TrustedPrefixes() []netip.Prefix {
+	var out []netip.Prefix
+	for _, p := range c.TrustedProxies {
+		if pf, err := netip.ParsePrefix(p); err == nil {
+			out = append(out, pf)
+		} else if a, err := netip.ParseAddr(p); err == nil {
+			out = append(out, netip.PrefixFrom(a, a.BitLen()))
+		}
+	}
+	return out
 }

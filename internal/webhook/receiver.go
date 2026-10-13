@@ -6,6 +6,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"net/netip"
 	"sync/atomic"
 
 	"github.com/dymmer-code/dymploy/internal/provider"
@@ -45,8 +46,13 @@ type Receiver struct {
 	Queue     Enqueuer
 	Dedupe    *Dedupe
 	Limiter   *Limiter
-	MaxBody   int64
-	Log       *slog.Logger
+	// IPLimiter limits each client address (see ClientIP) before the shared Limiter counts anything, so that
+	// one address cannot use up what everybody else shares. TrustedProxies are the proxies whose
+	// X-Forwarded-For is believed.
+	IPLimiter      *IPLimiter
+	TrustedProxies []netip.Prefix
+	MaxBody        int64
+	Log            *slog.Logger
 
 	current atomic.Pointer[Policy]
 }
@@ -75,9 +81,16 @@ func (rc *Receiver) Handler() http.Handler {
 
 func (rc *Receiver) serve(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("provider")
-	log := rc.Log.With("provider", name, "remote", r.RemoteAddr)
+	client := ClientIP(r, rc.TrustedProxies)
+	log := rc.Log.With("provider", name, "remote", client)
 
-	// Cheapest check first: flooding must not cost a signature check per request.
+	// Cheapest checks first: flooding must not cost a signature check per request.
+	if !rc.IPLimiter.Allow(client) {
+		w.Header().Set("Retry-After", "60")
+		reply(w, http.StatusTooManyRequests, "rate limited")
+		log.Warn("webhook refused", "reason", "rate limited (this address)")
+		return
+	}
 	if rc.Limiter != nil && !rc.Limiter.Allow() {
 		w.Header().Set("Retry-After", "60")
 		reply(w, http.StatusTooManyRequests, "rate limited")
