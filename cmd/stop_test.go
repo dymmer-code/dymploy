@@ -341,8 +341,8 @@ func TestAReloadThatRemovesARepositoryStopsItsJobsProperly(t *testing.T) {
 	}
 	r.push(t, "rl-1", "other") // runs
 	waitFor(t, func() bool { return len(r.jobs(t, "running")) == 1 })
-	r.push(t, "rl-3", "other")   // waits behind the first one of its repository
-	r.push(t, "rl-2", "shop") // another repository, also waiting
+	r.push(t, "rl-3", "other") // waits behind the first one of its repository
+	r.push(t, "rl-2", "shop")  // another repository, also waiting
 	waitFor(t, func() bool { return len(r.jobs(t, "queued")) == 2 })
 
 	if err := os.Remove(filepath.Join(r.dir, "config.d", "50-other.yaml")); err != nil {

@@ -77,11 +77,11 @@ func TestTryTakesWhatAJobWouldSee(t *testing.T) {
 func TestTryWorksOutWhichRepositoryItIs(t *testing.T) {
 	ctx := context.Background()
 	for remote, want := range map[string]string{
-		"git@github.com:acme/shop":           "github/acme/shop",
+		"git@github.com:acme/shop":              "github/acme/shop",
 		"https://github.com/globex/dymploy.git": "github/globex/dymploy",
-		"ssh://git@github.com/acme/app.git":          "github/acme/app",
-		"git@gitlab.example.com:acme/app.git":        "local/local/",
-		"":                                           "local/local/",
+		"ssh://git@github.com/acme/app.git":     "github/acme/app",
+		"git@gitlab.example.com:acme/app.git":   "local/local/",
+		"":                                      "local/local/",
 	} {
 		ev, err := identify(ctx, project(t, remote), "", "")
 		if err != nil {
