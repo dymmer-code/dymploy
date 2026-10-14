@@ -69,6 +69,9 @@ type Limits struct {
 	CPUs    *float64 `yaml:"cpus"`
 	Memory  string   `yaml:"memory"`
 	Timeout Duration `yaml:"timeout"`
+	// NoFile is the limit of open files of the build's containers (RLIMIT_NOFILE). Unset, they keep the one of
+	// the container engine, which is very high on some hosts and makes some runtimes reserve memory from it.
+	NoFile *int `yaml:"nofile"`
 }
 
 // Artifact says which files of the build result are packed into the transportable tar.gz.

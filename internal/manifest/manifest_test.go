@@ -27,7 +27,7 @@ build:
     args: {OTP_VERSION: "28.1"}
   env: {MIX_ENV: prod}
   network: none
-  limits: {cpus: 2, memory: 2g, timeout: 20m}
+  limits: {cpus: 2, memory: 2g, timeout: 20m, nofile: 65536}
   cache:
     - {name: hex, path: /root/.hex}
   steps:
@@ -93,7 +93,7 @@ func TestFullManifest(t *testing.T) {
 	m := mustParse(t, full)
 	b := m.Build
 	if b.Image.Dockerfile != "docker/Dockerfile.build" || b.Image.Args["OTP_VERSION"] != "28.1" || b.Env["MIX_ENV"] != "prod" ||
-		b.Network != "none" || b.Limits.CPUs == nil || *b.Limits.CPUs != 2 || b.Limits.Memory != "2g" || b.Limits.Timeout.D() != 20*time.Minute ||
+		b.Network != "none" || b.Limits.CPUs == nil || *b.Limits.CPUs != 2 || b.Limits.Memory != "2g" || b.Limits.Timeout.D() != 20*time.Minute || b.Limits.NoFile == nil || *b.Limits.NoFile != 65536 ||
 		len(b.Cache) != 1 || b.Cache[0].Path != "/root/.hex" {
 		t.Fatalf("%+v", b)
 	}
@@ -166,6 +166,9 @@ func TestInvalidManifests(t *testing.T) {
 		{"cpus", strings.Replace(minimal, "  steps:", "  limits: {cpus: 0}\n  steps:", 1), "build.limits.cpus"},
 		{"too many cpus", strings.Replace(minimal, "  steps:", "  limits: {cpus: 1000}\n  steps:", 1), "build.limits.cpus"},
 		{"memory", strings.Replace(minimal, "  steps:", "  limits: {memory: lots}\n  steps:", 1), "build.limits.memory"},
+		{"nofile zero", strings.Replace(minimal, "  steps:", "  limits: {nofile: 0}\n  steps:", 1), "build.limits.nofile"},
+		{"nofile negative", strings.Replace(minimal, "  steps:", "  limits: {nofile: -1}\n  steps:", 1), "build.limits.nofile"},
+		{"nofile too big", strings.Replace(minimal, "  steps:", "  limits: {nofile: 2000000}\n  steps:", 1), "build.limits.nofile"},
 		{"timeout without unit", strings.Replace(minimal, "  steps:", "  limits: {timeout: 20}\n  steps:", 1), "timeout"},
 		{"timeout too long", strings.Replace(minimal, "  steps:", "  limits: {timeout: 99h}\n  steps:", 1), "build.limits.timeout"},
 		{"cache path relative", strings.Replace(minimal, "  steps:", "  cache: [{name: a, path: relative}]\n  steps:", 1), "build.cache[0].path"},

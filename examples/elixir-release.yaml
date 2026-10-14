@@ -10,7 +10,8 @@ build:
   cache:
     - {name: hex,   path: /root/.hex}
     - {name: mix,   path: /root/.mix}
-  limits: {cpus: 2, memory: 2g, timeout: 20m}
+  # nofile: the Erlang VM sizes its tables from the open files limit, which a container may have at about a billion
+  limits: {cpus: 2, memory: 2g, timeout: 20m, nofile: 65536}
   steps:
     - name: dependencies
       run: mix deps.get --only prod

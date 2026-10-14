@@ -323,7 +323,7 @@ func (b *build) buildImage(ctx context.Context, im manifest.Image) (string, erro
 	}
 	tag := "dymploy-build-" + strings.ToLower(b.id)
 	b.t.Log.System(fmt.Sprintf("building the image from %s", im.Dockerfile))
-	err = b.r.cfg.Engine.BuildImage(ctx, BuildSpec{Tag: tag, Dockerfile: df, Context: cx, Args: im.Args, Memory: b.limits.memory, CPUs: b.limits.cpus}, b.t.Log.Stdout(), b.t.Log.Stderr())
+	err = b.r.cfg.Engine.BuildImage(ctx, BuildSpec{Tag: tag, Dockerfile: df, Context: cx, Args: im.Args, Memory: b.limits.memory, CPUs: b.limits.cpus, NoFile: b.limits.nofile}, b.t.Log.Stdout(), b.t.Log.Stderr())
 	return tag, err
 }
 
@@ -390,7 +390,7 @@ func (b *build) step(ctx context.Context, i int, s manifest.Step, image string, 
 	spec := ContainerSpec{
 		Name: fmt.Sprintf("dymploy-%s-%d", b.id, i+1), Image: image, Cmd: []string{"sh", "-ec", s.Run},
 		Workdir: workdir, User: b.r.cfg.User, Env: env, Mounts: mounts, Network: b.m.Build.Network,
-		Memory: b.limits.memory, CPUs: b.limits.cpus, Labels: map[string]string{"dymploy.job": b.t.JobID},
+		Memory: b.limits.memory, CPUs: b.limits.cpus, NoFile: b.limits.nofile, Labels: map[string]string{"dymploy.job": b.t.JobID},
 	}
 	id, err := eng.Create(ctx, spec)
 	if err != nil {

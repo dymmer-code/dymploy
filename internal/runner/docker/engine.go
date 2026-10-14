@@ -26,6 +26,7 @@ type ContainerSpec struct {
 	Network string // "default" or "none"
 	CPUs    float64
 	Memory  string // as the manifest writes it: 512m, 2g
+	NoFile  int    // open files limit (RLIMIT_NOFILE); 0 leaves the engine's own
 	Labels  map[string]string
 }
 
@@ -38,6 +39,7 @@ type BuildSpec struct {
 	// Memory and CPUs bound the build as far as the engine's builder honours them.
 	Memory string
 	CPUs   float64
+	NoFile int // open files limit; 0 leaves the engine's own
 }
 
 // Engine is everything dymploy needs from a container engine. The real implementation talks to the

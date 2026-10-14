@@ -25,6 +25,18 @@ func TestParamsDefaults(t *testing.T) {
 	}
 }
 
+func TestParamsNoFile(t *testing.T) {
+	// not set by default: the containers keep the engine's own limit
+	p, err := ParseParams(nil)
+	if err != nil || p.Limits.NoFile != 0 {
+		t.Fatalf("%v %+v", err, p)
+	}
+	p, err = ParseParams(json.RawMessage(`{"limits":{"nofile":65536}}`))
+	if err != nil || p.Limits.NoFile != 65536 {
+		t.Fatalf("%v %+v", err, p)
+	}
+}
+
 func TestParamsRefusals(t *testing.T) {
 	for name, raw := range map[string]string{
 		"unknown key":      `{"memry":"1g"}`,
@@ -34,6 +46,8 @@ func TestParamsRefusals(t *testing.T) {
 		"zero memory":      `{"limits":{"memory":"0m"}}`,
 		"no unit":          `{"limits":{"memory":"512"}}`,
 		"negative cpus":    `{"limits":{"cpus":-1}}`,
+		"negative nofile":  `{"limits":{"nofile":-1}}`,
+		"too many files":   `{"limits":{"nofile":2000000}}`,
 		"too many cpus":    `{"limits":{"cpus":100}}`,
 		"bad timeout":      `{"limits":{"timeout":"soon"}}`,
 		"tiny timeout":     `{"limits":{"timeout":"1ms"}}`,
@@ -93,5 +107,35 @@ func TestResolveAppliesTheServersLimits(t *testing.T) {
 		if _, err := p.resolve(limitsOf(t, yaml)); err == nil || !strings.Contains(err.Error(), want) {
 			t.Errorf("%q: want %q, got %v", yaml, want, err)
 		}
+	}
+}
+
+func TestResolveNoFile(t *testing.T) {
+	// the server says nothing: a build gets the engine's limit unless it asks for one, whatever it asks
+	p, _ := ParseParams(nil)
+	e, err := p.resolve(limitsOf(t, ""))
+	if err != nil || e.nofile != 0 {
+		t.Fatalf("%v %+v", err, e)
+	}
+	e, err = p.resolve(limitsOf(t, "  limits: {nofile: 65536}\n"))
+	if err != nil || e.nofile != 65536 {
+		t.Fatalf("%v %+v", err, e)
+	}
+	// the server sets it: that is what a build gets by default and the most it may ask for
+	p, _ = ParseParams(json.RawMessage(`{"limits":{"nofile":65536}}`))
+	e, err = p.resolve(limitsOf(t, ""))
+	if err != nil || e.nofile != 65536 {
+		t.Fatalf("%v %+v", err, e)
+	}
+	e, err = p.resolve(limitsOf(t, "  limits: {nofile: 4096}\n"))
+	if err != nil || e.nofile != 4096 {
+		t.Fatalf("%v %+v", err, e)
+	}
+	if _, err := p.resolve(limitsOf(t, "  limits: {nofile: 65536}\n")); err != nil {
+		t.Fatalf("the maximum itself: %v", err)
+	}
+	if _, err := p.resolve(limitsOf(t, "  limits: {nofile: 100000}\n")); err == nil ||
+		!strings.Contains(err.Error(), "build.limits.nofile 100000 is more than this server allows (65536)") {
+		t.Fatalf("%v", err)
 	}
 }

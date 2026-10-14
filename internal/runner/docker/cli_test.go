@@ -14,7 +14,7 @@ import (
 func TestCreateArgsAreUnprivilegedAndComplete(t *testing.T) {
 	args, err := createArgs(ContainerSpec{
 		Name: "n", Image: "alpine:3", Cmd: []string{"sh", "-ec", "echo hi"}, Workdir: "/work", User: "1:2",
-		Env: map[string]string{"B": "2", "A": "1"}, Network: "none", CPUs: 1.5, Memory: "512m",
+		Env: map[string]string{"B": "2", "A": "1"}, Network: "none", CPUs: 1.5, Memory: "512m", NoFile: 65536,
 		Labels: map[string]string{"k": "v"},
 		Mounts: []Mount{{Host: "/h/repo", Container: "/work"}, {Host: "/h/c", Container: "/c", ReadOnly: true}},
 	})
@@ -24,7 +24,7 @@ func TestCreateArgsAreUnprivilegedAndComplete(t *testing.T) {
 	got := strings.Join(args, " ")
 	for _, want := range []string{
 		"create --init --cap-drop=ALL --security-opt=no-new-privileges --pids-limit=1024", "--name n", "--user 1:2", "--workdir /work",
-		"--network none", "--cpus 1.5", "--memory 512m --memory-swap 512m", "--label k=v", "--env A=1 --env B=2",
+		"--network none", "--cpus 1.5", "--memory 512m --memory-swap 512m", "--ulimit nofile=65536:65536", "--label k=v", "--env A=1 --env B=2",
 		"--mount type=bind,source=/h/repo,target=/work --mount type=bind,source=/h/c,target=/c,readonly",
 	} {
 		if !strings.Contains(got, want) {
@@ -258,13 +258,23 @@ func TestTheEngineGetsASmallEnvironment(t *testing.T) {
 func TestBuildImageLimits(t *testing.T) {
 	c, calls := fakeDocker(t)
 	var b bytes.Buffer
-	if err := c.BuildImage(context.Background(), BuildSpec{Tag: "t", Dockerfile: "/r/D", Context: "/r", Memory: "1g", CPUs: 1.5}, &b, &b); err != nil {
+	if err := c.BuildImage(context.Background(), BuildSpec{Tag: "t", Dockerfile: "/r/D", Context: "/r", Memory: "1g", CPUs: 1.5, NoFile: 4096}, &b, &b); err != nil {
 		t.Fatal(err)
 	}
 	last := calls()[len(calls())-1]
-	for _, want := range []string{"--memory 1g --memory-swap 1g", "--cpu-period 100000 --cpu-quota 150000"} {
+	for _, want := range []string{"--memory 1g --memory-swap 1g", "--cpu-period 100000 --cpu-quota 150000", "--ulimit nofile=4096:4096"} {
 		if !strings.Contains(last, want) {
 			t.Errorf("%q lacks %q", last, want)
 		}
+	}
+}
+
+func TestNoFileIsOnlyPassedWhenSet(t *testing.T) {
+	args, err := createArgs(ContainerSpec{Name: "n", Image: "alpine:3", Cmd: []string{"true"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(args, " "); strings.Contains(got, "--ulimit") {
+		t.Errorf("no limit was asked for, the engine keeps its own: %s", got)
 	}
 }

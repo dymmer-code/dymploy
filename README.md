@@ -232,6 +232,7 @@ runner:
       memory: 4g          # default 4g
       cpus: 2             # default 2
       timeout: 1h         # default 1h
+      nofile: 65536       # open files of the containers; unset keeps the container engine's own limit
     cache_scope: repository   # who shares a build cache: "repository" (default) or "branch"
 cache_keep_days: 30       # caches not used for this long are removed; 0 keeps them
 cache_max_mb: 5120        # a cache that grows past this is emptied (the next build starts from nothing); 0 = no limit

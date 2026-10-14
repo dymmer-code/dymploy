@@ -19,6 +19,9 @@ var (
 	cacheNameRE = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,62}$`)
 )
 
+// MaxNoFile is the most open files a definition (or the server) may ask the containers for.
+const MaxNoFile = 1 << 20
+
 const (
 	maxSteps     = 100
 	maxRunLength = 8 << 10
@@ -60,6 +63,9 @@ func (v *validator) build(b *Build) {
 	}
 	if b.Limits.Memory != "" && !memoryRE.MatchString(b.Limits.Memory) {
 		v.add("build.limits.memory", "%q is not valid: use a number and k, m or g (for example 512m or 2g)", b.Limits.Memory)
+	}
+	if n := b.Limits.NoFile; n != nil && (*n < 1 || *n > MaxNoFile) {
+		v.add("build.limits.nofile", "must be between 1 and %d", MaxNoFile)
 	}
 	v.duration("build.limits.timeout", b.Limits.Timeout, time.Second, 4*time.Hour)
 	seen := map[string]bool{}

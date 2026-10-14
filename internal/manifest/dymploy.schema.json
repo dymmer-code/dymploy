@@ -63,7 +63,8 @@
       "properties": {
         "cpus": {"type": "number", "exclusiveMinimum": 0, "maximum": 64},
         "memory": {"type": "string", "pattern": "^[1-9][0-9]{0,5}[kmg]$", "description": "For example 512m or 2g."},
-        "timeout": {"$ref": "#/$defs/duration", "description": "Default 30m, at most 4h."}
+        "timeout": {"$ref": "#/$defs/duration", "description": "Default 30m, at most 4h."},
+        "nofile": {"type": "integer", "minimum": 1, "maximum": 1048576, "description": "Open files limit of the build's containers. Unset, they keep the container engine's own."}
       }
     },
     "artifact": {

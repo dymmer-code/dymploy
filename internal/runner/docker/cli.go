@@ -102,6 +102,9 @@ func (c *CLI) BuildImage(ctx context.Context, b BuildSpec, out, errOut io.Writer
 	if b.CPUs > 0 {
 		args = append(args, "--cpu-period", "100000", "--cpu-quota", strconv.Itoa(int(b.CPUs*100000)))
 	}
+	if b.NoFile > 0 {
+		args = append(args, "--ulimit", fmt.Sprintf("nofile=%d:%d", b.NoFile, b.NoFile))
+	}
 	for _, k := range sortedKeys(b.Args) {
 		args = append(args, "--build-arg", k+"="+b.Args[k])
 	}
@@ -161,6 +164,9 @@ func createArgs(s ContainerSpec) ([]string, error) {
 	}
 	if s.Memory != "" {
 		args = append(args, "--memory", s.Memory, "--memory-swap", s.Memory)
+	}
+	if s.NoFile > 0 {
+		args = append(args, "--ulimit", fmt.Sprintf("nofile=%d:%d", s.NoFile, s.NoFile))
 	}
 	for _, k := range sortedKeys(s.Labels) {
 		args = append(args, "--label", k+"="+s.Labels[k])

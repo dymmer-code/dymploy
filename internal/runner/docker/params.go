@@ -21,11 +21,14 @@ type Params struct {
 	// something in the cache that a more trusted one builds from.
 	CacheScope string `json:"cache_scope"`
 	// Limits are the most a build may use and what it gets when its definition says nothing. A
-	// definition that asks for more is refused. Unset values are 4g, 2 cpus and 1h.
+	// definition that asks for more is refused. Unset values are 4g, 2 cpus and 1h. NoFile (open files of
+	// the containers) is the exception: unset, the containers keep the container engine's own limit and a
+	// definition may ask for any value up to manifest.MaxNoFile.
 	Limits struct {
 		Memory  string  `json:"memory"`
 		CPUs    float64 `json:"cpus"`
 		Timeout string  `json:"timeout"`
+		NoFile  int     `json:"nofile"`
 	} `json:"limits"`
 }
 
@@ -69,6 +72,9 @@ func ParseParams(raw json.RawMessage) (Params, error) {
 	case p.Limits.CPUs < 0 || p.Limits.CPUs > 64:
 		return Params{}, fmt.Errorf("the docker runner's params are invalid: limits.cpus must be greater than 0 and at most 64")
 	}
+	if p.Limits.NoFile < 0 || p.Limits.NoFile > manifest.MaxNoFile {
+		return Params{}, fmt.Errorf("the docker runner's params are invalid: limits.nofile must be between 1 and %d (or unset)", manifest.MaxNoFile)
+	}
 	if p.Limits.Timeout == "" {
 		p.Limits.Timeout = DefaultTimeout.String()
 	}
@@ -111,12 +117,13 @@ type effective struct {
 	memory  string
 	cpus    float64
 	timeout time.Duration
+	nofile  int // 0: the engine's own limit
 }
 
 // resolve applies the server's limits to a definition: what it does not ask for is the server's
 // default, and what it asks for beyond the server's maximum is an error that names both.
 func (p Params) resolve(l manifest.Limits) (effective, error) {
-	e := effective{memory: p.Limits.Memory, cpus: p.Limits.CPUs}
+	e := effective{memory: p.Limits.Memory, cpus: p.Limits.CPUs, nofile: p.Limits.NoFile}
 	e.timeout, _ = time.ParseDuration(p.Limits.Timeout)
 	max, _ := memoryBytes(p.Limits.Memory)
 	if l.Memory != "" {
@@ -131,6 +138,12 @@ func (p Params) resolve(l manifest.Limits) (effective, error) {
 			return effective{}, fmt.Errorf("build.limits.cpus %g is more than this server allows (%g)", *l.CPUs, p.Limits.CPUs)
 		}
 		e.cpus = *l.CPUs
+	}
+	if l.NoFile != nil {
+		if p.Limits.NoFile > 0 && *l.NoFile > p.Limits.NoFile {
+			return effective{}, fmt.Errorf("build.limits.nofile %d is more than this server allows (%d)", *l.NoFile, p.Limits.NoFile)
+		}
+		e.nofile = *l.NoFile
 	}
 	if t := l.Timeout.D(); t > e.timeout {
 		return effective{}, fmt.Errorf("build.limits.timeout %s is more than this server allows (%s)", t, e.timeout)

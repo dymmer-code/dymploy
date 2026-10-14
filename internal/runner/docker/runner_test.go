@@ -534,6 +534,32 @@ func TestTheServersLimitsAreAppliedAndCannotBeExceeded(t *testing.T) {
 	}
 }
 
+func TestTheOpenFilesLimitReachesTheContainersOnlyWhenAsked(t *testing.T) {
+	r := newRig(t, basic)
+	r.eng.Script = func(docker.ContainerSpec) dockertest.Behavior {
+		return dockertest.Behavior{Effect: writeOut("out/app")}
+	}
+	if res, err := r.do(context.Background()); err != nil || res.ExitCode != 0 {
+		t.Fatalf("%+v %v", res, err)
+	}
+	if c := r.eng.Created[0]; c.NoFile != 0 {
+		t.Fatalf("nothing asked and the server sets nothing: the engine keeps its own limit: %+v", c)
+	}
+
+	r = newRig(t, strings.Replace(basic, "build:\n", "build:\n  limits: {nofile: 65536}\n", 1))
+	r.eng.Script = func(docker.ContainerSpec) dockertest.Behavior {
+		return dockertest.Behavior{Effect: writeOut("out/app")}
+	}
+	if res, err := r.do(context.Background()); err != nil || res.ExitCode != 0 {
+		t.Fatalf("%+v %v", res, err)
+	}
+	for _, c := range r.eng.Created {
+		if c.NoFile != 65536 {
+			t.Fatalf("every step container gets the limit the definition asked for: %+v", c)
+		}
+	}
+}
+
 func TestBadServerParamsAreErrorsOfTheRunner(t *testing.T) {
 	r := newRig(t, basic)
 	_, err := r.run.Run(context.Background(), runner.Task{JobID: "j", Params: json.RawMessage(`{"submodules":true}`), Log: runner.NewLineReporter(func(runner.Stream, string) {})})

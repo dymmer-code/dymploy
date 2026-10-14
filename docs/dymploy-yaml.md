@@ -24,7 +24,7 @@ build:                      # required
   image: …                  # the environment: from (an image) or dockerfile (one of the repository), exactly one
   env: {…}                  # variables for every step
   network: default | none   # none cuts the network of every step
-  limits: {cpus, memory, timeout}
+  limits: {cpus, memory, timeout, nofile}
   cache: [{name, path}]     # container directories kept between builds
   steps: [{name, run, image, workdir, env}]
 artifact:                   # optional; required when there is a deploy
@@ -57,8 +57,11 @@ succeeds or fails with them.
   Kept per repository between builds. **They must not be inside `/work`** (that is the build tree, and the artifact is read
   from it): use paths such as `/cache/...` and the variables of your tools (`MIX_HOME`, `npm_config_cache`…).
 - **`limits`**: `cpus` (> 0, ≤ 64), `memory` (`512m`, `2g`…), `timeout` (default 30m, at most 4h, for the whole build; when
-  it runs out the job ends with exit code 124). The server sets defaults and maximums (`runner.params.limits`); asking
-  for more is an error.
+  it runs out the job ends with exit code 124) and `nofile` (1 to 1048576: the limit of open files of the containers,
+  `--ulimit nofile`). The server sets defaults and maximums (`runner.params.limits`); asking for more is an error.
+  `nofile` is optional: unset, the containers keep the limit of the container engine, which on some hosts is about a
+  billion, and some runtimes size their tables from it (the Erlang VM, for one, takes about 2 GiB just to start).
+  If the server sets `runner.params.limits.nofile`, that is what a build gets when it asks for nothing and the most it may ask for.
 - **`env`**: valid variable names; those starting with `DYMPLOY_` are reserved; values up to 4 KiB with no NUL. Layers,
   in order: `build.env`, `step.env`, then the `DYMPLOY_*` variables, which always win.
 
