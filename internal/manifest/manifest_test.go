@@ -349,3 +349,12 @@ func TestDeploySecretsIsAnOptInBoolean(t *testing.T) {
 		t.Fatal("a definition must not be able to name a secrets source")
 	}
 }
+
+func TestArtifactPathsMayBePatterns(t *testing.T) {
+	if _, err := Parse([]byte("version: 1\nbuild:\n  image: {from: \"debian:13\"}\n  steps: [{run: make}]\nartifact:\n  paths: [\"pub/*.pdf\", \"pub/*.epub\", \"site/*\"]\n")); err != nil {
+		t.Fatalf("patterns with different base names are fine: %v", err)
+	}
+	if _, err := Parse([]byte("version: 1\nbuild:\n  image: {from: \"debian:13\"}\n  steps: [{run: make}]\nartifact:\n  paths: [\"pub/[a-\"]\n")); err == nil || !strings.Contains(err.Error(), "not a valid pattern") {
+		t.Fatalf("%v", err)
+	}
+}

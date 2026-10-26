@@ -71,6 +71,13 @@ succeeds or fails with them.
   **under its base name** at the root of the archive (`app/_build/rel/shop` → `shop/…`; `out/book.pdf` → `book.pdf`), so
   the layout is predictable (and a release is installed with `--strip-components=1`). Two paths with the same base name
   are an error.
+  A path can be a **pattern**: `*`, `?` and `[…]` (Go's `path.Match`, applied to one segment at a time, so there is no
+  `**`). Everything the pattern matches is stored, each match under its own base name: `pub/*.pdf` stores
+  `pub/book_1.2.pdf` as `book_1.2.pdf`, and `site/*` stores the *contents* of `site` at the root of the archive (where the
+  plain path `site` would store a directory named `site`). Matches are sorted; two that would be stored under the same name
+  are an error. A pattern that matches nothing is **not** an error: the log says so, and if nothing else is packed the
+  artifact is empty (a build that has nothing to publish, such as a commit that is not a release, ends well and a bucket
+  target puts nothing). A path with no wildcard that does not exist still is an error.
 - `exclude`: patterns (`path.Match` syntax). Without `/` they match the name of a file or directory at any depth
   (`*.log`); with `/` they match the path inside the archive (`shop/log/*`). An excluded directory is left out with
   everything below it.

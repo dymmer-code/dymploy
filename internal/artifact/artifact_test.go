@@ -295,3 +295,100 @@ func TestRecordProblems(t *testing.T) {
 		t.Fatal("cannot write into a missing directory")
 	}
 }
+
+func TestAPatternStoresWhatItMatchesEachUnderItsBaseName(t *testing.T) {
+	root, dest := t.TempDir(), filepath.Join(t.TempDir(), "out")
+	write(t, root, "pub/Libro_1.1.pdf", "pdf", 0o644)
+	write(t, root, "pub/Libro_1.1.epub", "epub", 0o644)
+	write(t, root, "pub/notas.txt", "n", 0o644)
+	write(t, root, "pub/old/Libro_1.0.pdf", "old", 0o644)
+	res, err := Pack(root, Spec{Name: "books", Paths: []string{"pub/*.pdf", "pub/*.epub"}}, dest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := read(t, res.Path)
+	if len(got) != 2 || got["Libro_1.1.pdf"].Body != "pdf" || got["Libro_1.1.epub"].Body != "epub" || len(res.Unmatched) != 0 {
+		t.Fatalf("%v %v", got, res.Unmatched)
+	}
+}
+
+func TestAPatternOnADirectoryStoresItsContentsAtTheRoot(t *testing.T) {
+	root, dest := t.TempDir(), filepath.Join(t.TempDir(), "out")
+	write(t, root, "site/index.html", "home", 0o644)
+	write(t, root, "site/assets/app.css", "css", 0o644)
+	write(t, root, "site/.well-known/x", "x", 0o644)
+	res, err := Pack(root, Spec{Name: "site", Paths: []string{"site/*"}}, dest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := read(t, res.Path)
+	if got["index.html"].Body != "home" || got["assets/app.css"].Body != "css" || got[".well-known/x"].Body != "x" || got["site/index.html"].Body != "" {
+		t.Fatalf("%v", got)
+	}
+}
+
+func TestAPatternMayMatchInTheMiddleOfAPath(t *testing.T) {
+	root, dest := t.TempDir(), filepath.Join(t.TempDir(), "out")
+	write(t, root, "out/es/book.pdf", "es", 0o644)
+	write(t, root, "out/en/other.pdf", "en", 0o644)
+	res, err := Pack(root, Spec{Name: "b", Paths: []string{"out/*/*.pdf"}}, dest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := read(t, res.Path)
+	if len(got) != 2 || got["book.pdf"].Body != "es" || got["other.pdf"].Body != "en" {
+		t.Fatalf("%v", got)
+	}
+}
+
+func TestAPatternThatMatchesNothingGivesAnEmptyArtifactAndSaysSo(t *testing.T) {
+	root, dest := t.TempDir(), filepath.Join(t.TempDir(), "out")
+	write(t, root, "pub/notas.txt", "n", 0o644)
+	res, err := Pack(root, Spec{Name: "books", Paths: []string{"pub/*.pdf"}}, dest)
+	if err != nil {
+		t.Fatalf("a build with nothing to publish is not an error: %v", err)
+	}
+	if got := read(t, res.Path); len(got) != 0 || res.Files != 0 || len(res.Unmatched) != 1 || res.Unmatched[0] != "pub/*.pdf" {
+		t.Fatalf("%v %+v", got, res)
+	}
+	// a literal path that is missing still is an error, and so is an artifact emptied by exclusions
+	if _, err := Pack(root, Spec{Name: "x", Paths: []string{"pub/missing.pdf"}}, dest); err == nil || !strings.Contains(err.Error(), "was not produced") {
+		t.Fatalf("%v", err)
+	}
+	if _, err := Pack(root, Spec{Name: "x", Paths: []string{"pub/notas.txt"}, Exclude: []string{"*.txt"}}, dest); err == nil {
+		t.Fatal("excluding everything must still be refused")
+	}
+}
+
+func TestPatternsThatWouldStoreTwoFilesWithTheSameNameAreRefused(t *testing.T) {
+	root, dest := t.TempDir(), filepath.Join(t.TempDir(), "out")
+	write(t, root, "a/book.pdf", "1", 0o644)
+	write(t, root, "b/book.pdf", "2", 0o644)
+	if _, err := Pack(root, Spec{Name: "x", Paths: []string{"*/book.pdf"}}, dest); err == nil || !strings.Contains(err.Error(), "both be stored") {
+		t.Fatalf("%v", err)
+	}
+}
+
+func TestAPatternDoesNotFollowALinkOutOfTheBuild(t *testing.T) {
+	root, dest, outside := t.TempDir(), filepath.Join(t.TempDir(), "out"), t.TempDir()
+	write(t, outside, "secret.pdf", "secret", 0o644)
+	write(t, root, "pub/ok.pdf", "ok", 0o644)
+	if err := os.Symlink(outside, filepath.Join(root, "esc")); err != nil {
+		t.Fatal(err)
+	}
+	res, err := Pack(root, Spec{Name: "x", Paths: []string{"*/*.pdf"}}, dest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := read(t, res.Path)
+	if len(got) != 1 || got["ok.pdf"].Body != "ok" {
+		t.Fatalf("a link to the outside must contribute nothing: %v", got)
+	}
+}
+
+func TestAnInvalidPatternIsRefused(t *testing.T) {
+	root, dest := t.TempDir(), filepath.Join(t.TempDir(), "out")
+	if _, err := Pack(root, Spec{Name: "x", Paths: []string{"pub/[a-"}}, dest); err == nil || !strings.Contains(err.Error(), "not a valid pattern") {
+		t.Fatalf("%v", err)
+	}
+}

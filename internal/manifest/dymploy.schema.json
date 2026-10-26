@@ -71,7 +71,7 @@
       "type": "object", "additionalProperties": false, "required": ["paths"],
       "properties": {
         "name": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$", "description": "Name of the tar.gz (default: the last element of the first path)."},
-        "paths": {"type": "array", "minItems": 1, "maxItems": 50, "items": {"$ref": "#/$defs/relativePath"}},
+        "paths": {"type": "array", "minItems": 1, "maxItems": 50, "items": {"$ref": "#/$defs/relativePath"}, "description": "Files or directories of the build, each stored under its base name. A path may have the wildcards * ? [ ] (one segment at a time, no **): every match is stored under its own base name, and a pattern that matches nothing is not an error."},
         "exclude": {"type": "array", "maxItems": 50, "items": {"type": "string", "minLength": 1, "maxLength": 200}}
       }
     },

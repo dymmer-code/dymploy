@@ -201,3 +201,14 @@ func TestAuthorizeDeployKnowsTheKindOfTheTarget(t *testing.T) {
 		t.Error("a server with no store cannot deploy to a bucket")
 	}
 }
+
+func TestPublishOfAnEmptyArtifactDoesNothingAndSucceeds(t *testing.T) {
+	p := newPub()
+	code, err := p.run(t, nil, books)
+	if err != nil || code != 0 || len(p.store.Objects) != 0 {
+		t.Fatalf("code=%d err=%v %v", code, err, p.store.Objects)
+	}
+	if !strings.Contains(strings.Join(p.logs, "\n"), "0 put, 0 unchanged") {
+		t.Fatalf("log:\n%s", strings.Join(p.logs, "\n"))
+	}
+}

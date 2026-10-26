@@ -144,6 +144,15 @@ func (v *validator) artifact(a *Artifact) {
 			v.add(fmt.Sprintf("artifact.paths[%d]", i), "%q must be a relative path inside the build, without ..", p)
 			continue
 		}
+		if strings.ContainsAny(p, "*?[") {
+			for _, seg := range strings.Split(path.Clean(p), "/") {
+				if _, err := path.Match(seg, ""); err != nil {
+					v.add(fmt.Sprintf("artifact.paths[%d]", i), "%q is not a valid pattern", p)
+					break
+				}
+			}
+			continue // what a pattern matches is only known when the build has run
+		}
 		// Each path is stored in the archive under its base name, so two with the same one would collide.
 		base := path.Base(path.Clean(p))
 		if j, dup := bases[base]; dup {

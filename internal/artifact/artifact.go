@@ -27,7 +27,10 @@ import (
 type Spec struct {
 	// Name of the archive without extension: the file is <Name>.tar.gz.
 	Name string
-	// Paths are relative to the root of the build. Each one is stored under its base name.
+	// Paths are relative to the root of the build. Each one is stored under its base name. A path whose
+	// segments have * ? or [ is a pattern (path.Match syntax, within one segment: there is no **): every file
+	// or directory it matches is stored, each under its own base name. A pattern that matches nothing is
+	// not an error (see Result.Unmatched).
 	Paths []string
 	// Exclude are patterns (path.Match syntax). One without "/" matches the name of a file or directory
 	// at any depth; one with "/" matches the path inside the archive (for example "app/log/*").
@@ -46,6 +49,9 @@ type Result struct {
 	SHA256 string // hex digest of the archive file
 	Size   int64  // size of the archive file
 	Files  int    // entries stored (files, directories and links)
+	// Unmatched are the patterns of Spec.Paths that matched nothing. The archive may then be empty: that is
+	// what a build says when it has nothing to publish.
+	Unmatched []string
 }
 
 // Pack writes <spec.Name>.tar.gz into destDir (created 0700 if needed; the file is 0600) and returns
@@ -87,7 +93,7 @@ func Pack(root string, spec Spec, destDir string) (Result, error) {
 	if err := p.packAll(); err != nil {
 		return Result{}, err
 	}
-	if p.files == 0 {
+	if p.files == 0 && len(p.unmatched) == 0 {
 		return Result{}, errors.New("the artifact is empty: the paths exist but everything in them was excluded")
 	}
 	if err := p.tw.Close(); err != nil {
@@ -110,7 +116,7 @@ func Pack(root string, spec Spec, destDir string) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
-	return Result{Path: abs, SHA256: hex.EncodeToString(h.Sum(nil)), Size: cw.n, Files: p.files}, nil
+	return Result{Path: abs, SHA256: hex.EncodeToString(h.Sum(nil)), Size: cw.n, Files: p.files, Unmatched: p.unmatched}, nil
 }
 
 type countWriter struct {
@@ -131,32 +137,107 @@ type packer struct {
 	limit int64
 	bytes int64
 	files int
+	// unmatched are the patterns that matched nothing; stored holds the base names already in the archive.
+	unmatched []string
+	stored    map[string]string
+}
+
+// isPattern says whether a path has wildcard characters.
+func isPattern(rel string) bool { return strings.ContainsAny(rel, "*?[") }
+
+// expand returns the paths (relative to the build, slash-separated) that the pattern matches, sorted, without
+// following a link out of the build: a segment is matched against the entries of the directory that the
+// segments before it lead to, and that directory is resolved first.
+func (p *packer) expand(clean string) ([]string, error) {
+	segments := strings.Split(clean, "/")
+	for _, seg := range segments {
+		if _, err := path.Match(seg, ""); err != nil {
+			return nil, fmt.Errorf("artifact path %q is not a valid pattern", clean)
+		}
+	}
+	found := []string{""}
+	for _, seg := range segments {
+		var next []string
+		for _, base := range found {
+			if !isPattern(seg) {
+				next = append(next, path.Join(base, seg))
+				continue
+			}
+			dir, err := filepath.EvalSymlinks(filepath.Join(p.root, filepath.FromSlash(base)))
+			if err != nil || !within(p.root, dir) {
+				continue
+			}
+			entries, err := os.ReadDir(dir)
+			if err != nil {
+				continue
+			}
+			for _, e := range entries {
+				if ok, _ := path.Match(seg, e.Name()); ok {
+					next = append(next, path.Join(base, e.Name()))
+				}
+			}
+		}
+		found = next
+	}
+	var out []string
+	for _, rel := range found {
+		if _, err := os.Lstat(filepath.Join(p.root, filepath.FromSlash(rel))); err == nil {
+			out = append(out, rel)
+		}
+	}
+	sort.Strings(out)
+	return out, nil
 }
 
 func (p *packer) packAll() error {
+	p.stored = map[string]string{}
 	for _, rel := range p.spec.Paths {
 		clean := path.Clean(rel)
 		if clean == "." || clean == ".." || strings.HasPrefix(clean, "../") || path.IsAbs(clean) {
 			return fmt.Errorf("artifact path %q must stay inside the build", rel)
 		}
-		src := filepath.Join(p.root, filepath.FromSlash(clean))
-		// Resolve the parents: a link in the middle of the path must not lead out of the build.
-		parent, err := filepath.EvalSymlinks(filepath.Dir(src))
-		if err != nil {
-			return fmt.Errorf("artifact path %q was not produced by the build", rel)
+		if isPattern(clean) {
+			matches, err := p.expand(clean)
+			if err != nil {
+				return err
+			}
+			if len(matches) == 0 {
+				p.unmatched = append(p.unmatched, rel)
+			}
+			for _, m := range matches {
+				if err := p.packOne(m, m); err != nil {
+					return err
+				}
+			}
+			continue
 		}
-		if !within(p.root, parent) {
-			return fmt.Errorf("artifact path %q leads outside the build", rel)
-		}
-		src = filepath.Join(parent, filepath.Base(src))
-		if _, err := os.Lstat(src); err != nil {
-			return fmt.Errorf("artifact path %q was not produced by the build", rel)
-		}
-		if err := p.walk(src, path.Base(clean), src); err != nil {
+		if err := p.packOne(rel, clean); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// packOne stores one path of the build under its base name. rel is how the definition spelled it, for errors.
+func (p *packer) packOne(rel, clean string) error {
+	if prev, dup := p.stored[path.Base(clean)]; dup {
+		return fmt.Errorf("artifact paths %q and %q would both be stored as %q", prev, clean, path.Base(clean))
+	}
+	p.stored[path.Base(clean)] = clean
+	src := filepath.Join(p.root, filepath.FromSlash(clean))
+	// Resolve the parents: a link in the middle of the path must not lead out of the build.
+	parent, err := filepath.EvalSymlinks(filepath.Dir(src))
+	if err != nil {
+		return fmt.Errorf("artifact path %q was not produced by the build", rel)
+	}
+	if !within(p.root, parent) {
+		return fmt.Errorf("artifact path %q leads outside the build", rel)
+	}
+	src = filepath.Join(parent, filepath.Base(src))
+	if _, err := os.Lstat(src); err != nil {
+		return fmt.Errorf("artifact path %q was not produced by the build", rel)
+	}
+	return p.walk(src, path.Base(clean), src)
 }
 
 func within(root, p string) bool {

@@ -284,6 +284,9 @@ func (b *build) run(ctx context.Context) (runner.Result, error) {
 		log.System("the build ran but its artifact could not be packed")
 		return runner.Result{ExitCode: ExitNoArtifact}, nil
 	}
+	for _, u := range res.Unmatched {
+		log.System(fmt.Sprintf("artifact.paths: the pattern %q matched nothing", u))
+	}
 	log.System(fmt.Sprintf("artifact %s: %d entries, %d bytes, sha256 %s", res.Path, res.Files, res.Size, res.SHA256))
 	rec := artifact.Record{
 		Name: b.m.Artifact.Name, File: filepath.Base(res.Path), SHA256: res.SHA256, Size: res.Size, Entries: res.Files,
