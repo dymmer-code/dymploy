@@ -1115,3 +1115,76 @@ func TestAnObserverThatNeverCatchesUpDoesNotBlockShutdownForeverAndOverflowIsDro
 	}
 	close(block)
 }
+
+// stateAtFinish remembers what the store says about a job at the moment its closing line reaches the log.
+type stateAtFinish struct {
+	job.Logs
+	store job.Store
+	seen  chan job.State
+}
+
+func (s *stateAtFinish) Append(id job.ID, e job.Entry) error {
+	if strings.HasPrefix(e.Text, "job finished:") {
+		j, err := s.store.Get(context.Background(), id)
+		if err == nil {
+			s.seen <- j.State
+		}
+	}
+	return s.Logs.Append(id, e)
+}
+
+// Whoever waits for the closing line of a job's log and then asks for its state must not find it still running.
+func TestTheStateIsFinalWhenTheClosingLineOfTheLogIsWritten(t *testing.T) {
+	store := job.NewMemStore()
+	logs := &stateAtFinish{Logs: job.NewMemLogs(), store: store, seen: make(chan job.State, 1)}
+	e := &env{store: store, fake: runnertest.New(runnertest.Exit(0))}
+	e.m = e.build(t, Config{MaxConcurrent: 1}, store, logs)
+	e.start(t)
+	j := e.submit(t, "a")
+	e.waitState(t, j.ID, job.Succeeded)
+	select {
+	case got := <-logs.seen:
+		if got != job.Succeeded {
+			t.Fatalf("the closing line was written while the store said %q", got)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the closing line was never written")
+	}
+}
+
+// abortAtFinish asks the queue to abort a job at the moment its closing line reaches the log.
+type abortAtFinish struct {
+	job.Logs
+	m      **Manager
+	result chan error
+}
+
+func (a *abortAtFinish) Append(id job.ID, e job.Entry) error {
+	if strings.HasPrefix(e.Text, "job finished:") {
+		a.result <- (*a.m).Abort(context.Background(), id, "too late")
+	}
+	return a.Logs.Append(id, e)
+}
+
+// A stop request that arrives once the final state is recorded finds a finished job and changes nothing.
+func TestAStopRequestAfterTheFinalStateIsRecordedChangesNothing(t *testing.T) {
+	store := job.NewMemStore()
+	e := &env{store: store, fake: runnertest.New(runnertest.Exit(0))}
+	logs := &abortAtFinish{Logs: job.NewMemLogs(), m: &e.m, result: make(chan error, 1)}
+	e.m = e.build(t, Config{MaxConcurrent: 1}, store, logs)
+	e.start(t)
+	j := e.submit(t, "a")
+	e.waitState(t, j.ID, job.Succeeded)
+	select {
+	case err := <-logs.result:
+		if !errors.Is(err, ErrFinished) {
+			t.Fatalf("Abort answered %v, want ErrFinished", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the closing line was never written")
+	}
+	got, err := store.Get(context.Background(), j.ID)
+	if err != nil || got.State != job.Succeeded || got.StopReason != "" {
+		t.Fatalf("the late stop request changed the job: %+v %v", got, err)
+	}
+}

@@ -126,6 +126,9 @@ type running struct {
 	rep      runner.Reporter // set by execute, before the job is visible to Abort
 	stopping bool
 	reason   string
+	// finished is set once the final state is in the store: from then on nothing may write the job again
+	// (a stop request that arrives while the closing line of the log is being written has nothing to stop).
+	finished bool
 }
 
 // Manager is the queue.
@@ -326,6 +329,9 @@ func (m *Manager) Abort(ctx context.Context, id job.ID, reason string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if r, ok := m.running[id]; ok {
+		if r.finished {
+			return ErrFinished
+		}
 		m.requestStop(r, reason)
 		return nil
 	}
@@ -350,7 +356,7 @@ func (m *Manager) Abort(ctx context.Context, id job.ID, reason string) error {
 
 // requestStop records the request, tells the story and cancels the job's context. Callers hold m.mu.
 func (m *Manager) requestStop(r *running, reason string) {
-	if r.stopping {
+	if r.stopping || r.finished {
 		return
 	}
 	r.stopping, r.reason = true, reason
@@ -615,6 +621,14 @@ func (m *Manager) execute(ctx context.Context, r *running) {
 		code := res.ExitCode
 		final.ExitCode = &code
 	}
+	// The final state is recorded before the closing line of the log is written: whoever waits for that line (a
+	// follower of the log, a script) and then asks for the job must find it finished, not still running.
+	m.mu.Lock()
+	r.finished = true
+	if err := m.d.Store.Put(context.Background(), final); err != nil {
+		m.log.Error("could not record the end of the job", "job", j.ID, "error", err)
+	}
+	m.mu.Unlock()
 	rep.System(finishLine(final))
 	rep.Close()
 
@@ -623,9 +637,6 @@ func (m *Manager) execute(ctx context.Context, r *running) {
 	delete(m.running, j.ID)
 	delete(m.busy, j.Name)
 	r.cancel(nil)
-	if err := m.d.Store.Put(context.Background(), final); err != nil {
-		m.log.Error("could not record the end of the job", "job", j.ID, "error", err)
-	}
 	m.log.Info("job finished", "job", j.ID, "name", j.Name, "state", final.State, "error", final.Error)
 	m.publish(Event{Type: EventFinished, Job: final})
 	m.dispatch()
