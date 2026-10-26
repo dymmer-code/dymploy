@@ -88,10 +88,13 @@ type Deploy struct {
 	// Secrets asks for the target's secrets: the server fetches them from the source configured for the
 	// target and puts them on it for the steps (path in $DYMPLOY_SECRETS_FILE). Which source is the
 	// server's decision; the definition cannot name one.
-	Secrets bool         `yaml:"secrets"`
-	Steps   []DeployStep `yaml:"steps"`
-	Check   *Check       `yaml:"check"`
-	After   *StepList    `yaml:"after"`
+	Secrets bool `yaml:"secrets"`
+	// Path is where, inside the bucket of an s3 target, the files of the artifact are put (a prefix, no
+	// leading slash). It is only for s3 targets; steps, check, after and secrets are only for ssh ones.
+	Path  string       `yaml:"path"`
+	Steps []DeployStep `yaml:"steps"`
+	Check *Check       `yaml:"check"`
+	After *StepList    `yaml:"after"`
 }
 
 // DeployStep is a command run on the target.

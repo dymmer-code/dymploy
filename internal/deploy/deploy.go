@@ -34,15 +34,30 @@ const (
 	ExitStep         = 5   // a deploy step failed
 	ExitCheck        = 6   // the health check never succeeded
 	ExitAfter        = 7   // the build is deployed and healthy, but an `after` step failed
+	ExitPublish      = 8   // a file of the artifact could not be put in the bucket of an s3 target
 	ExitTimeout      = 124 // deploy.timeout ran out (same code as timeout(1))
 )
 
 // DefaultUploadDir is where artifacts are copied when the target does not say.
 const DefaultUploadDir = "dymploy-uploads"
 
+// Kinds of target: a machine where the steps run (the default) or a bucket where the files are put.
+const (
+	KindSSH = "ssh"
+	KindS3  = "s3"
+)
+
 // Target is a place to deploy to.
 type Target struct {
-	Name       string
+	Name string
+	// Kind is KindSSH (or empty) or KindS3. An s3 target uses Endpoint, Bucket, Region and CredentialsFile
+	// and none of the SSH fields.
+	Kind            string
+	Endpoint        string
+	Bucket          string
+	Region          string
+	CredentialsFile string
+
 	Host       string
 	Port       int
 	User       string
@@ -84,6 +99,23 @@ type Remote interface {
 	Dial(ctx context.Context, t Target) (Conn, error)
 }
 
+// Store puts files in the buckets of s3 targets. Like Remote, the mechanism hides behind it (an S3 server in
+// production, a fake in tests).
+type Store interface {
+	// Check verifies, without connecting, that the target can be used: its credentials are there and usable.
+	Check(t Target) error
+	Open(ctx context.Context, t Target) (Bucket, error)
+}
+
+// Bucket is the bucket of an s3 target. dymploy only puts and reads back: it never deletes.
+type Bucket interface {
+	// Put stores the file under key, unless the bucket already has that key with this SHA-256 (it says so
+	// with written=false). The SHA-256 is kept with the object. The body is read from the start.
+	Put(ctx context.Context, key, contentType, sha string, size int64, body io.ReadSeeker) (written bool, err error)
+	// Sum reads the object back and returns the SHA-256 of what is stored.
+	Sum(ctx context.Context, key string) (string, error)
+}
+
 // Targets is the set of targets currently configured. It can be replaced while jobs run.
 type Targets struct {
 	mu sync.RWMutex
@@ -110,7 +142,9 @@ func (ts *Targets) Get(name string) (Target, bool) {
 
 // Deployer deploys artifacts.
 type Deployer struct {
-	Remote  Remote
+	Remote Remote
+	// Store puts the files of the artifact in the s3 targets; nil means this server has none.
+	Store   Store
 	Targets *Targets
 	// Secrets fetches the secrets of definitions that ask for them (deploy.secrets).
 	Secrets SecretFetcher
@@ -122,6 +156,21 @@ func (d *Deployer) AuthorizeDeploy(def *manifest.Deploy, ev provider.Event) (Tar
 	t, err := d.Authorize(def.Target, ev)
 	if err != nil {
 		return Target{}, err
+	}
+	if t.Kind == KindS3 {
+		switch {
+		case d.Store == nil:
+			return Target{}, fmt.Errorf("target %q is a bucket and this server cannot put files in buckets", def.Target)
+		case len(def.Steps) > 0 || def.Check != nil || def.After != nil || def.Secrets:
+			return Target{}, fmt.Errorf("target %q is a bucket: the deploy of its definitions takes target and path only (no steps, check, after or secrets)", def.Target)
+		}
+		return t, nil
+	}
+	if def.Path != "" {
+		return Target{}, fmt.Errorf("deploy.path is for bucket targets, and target %q is a machine", def.Target)
+	}
+	if len(def.Steps) == 0 {
+		return Target{}, fmt.Errorf("target %q is a machine: deploy.steps needs at least one step", def.Target)
 	}
 	if def.Secrets && (t.Secrets == nil || d.Secrets == nil) {
 		return Target{}, fmt.Errorf("deploy.secrets is set but target %q has no secrets source configured on this server", def.Target)
@@ -189,6 +238,9 @@ func (d *Deployer) Run(parent context.Context, r Request) (int, error) {
 	}
 
 	t := r.Target
+	if t.Kind == KindS3 {
+		return d.publish(ctx, r, ended)
+	}
 	// The secrets are fetched before touching the target: if their source fails, nothing has changed there.
 	var secrets []byte
 	if r.Deploy.Secrets {

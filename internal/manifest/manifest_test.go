@@ -115,6 +115,16 @@ func TestFullManifest(t *testing.T) {
 	}
 }
 
+func TestADeployForABucketHasAPathAndNoSteps(t *testing.T) {
+	m, err := Parse([]byte(minimal + "deploy:\n  target: garage-books\n  path: books/\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d := m.Deploy; d.Target != "garage-books" || d.Path != "books/" || len(d.Steps) != 0 {
+		t.Fatalf("%+v", d)
+	}
+}
+
 func TestThereIsNoRollbackAndTheErrorSaysSo(t *testing.T) {
 	_, err := Parse([]byte(minimal + "deploy:\n  target: production\n  steps: [{run: x}]\n  rollback: {steps: [{run: y}]}\n"))
 	if err == nil || !strings.Contains(err.Error(), `unknown key "rollback" in deploy`) || !strings.Contains(err.Error(), "never undoes") {
@@ -179,7 +189,8 @@ func TestInvalidManifests(t *testing.T) {
 		{"artifact name", strings.Replace(minimal, "paths:", "name: \"../x\"\n  paths:", 1), "artifact.name"},
 		{"deploy without target", minimal + "deploy:\n  steps:\n    - run: x\n", "deploy.target"},
 		{"deploy target is a host", minimal + "deploy:\n  target: root@10.0.0.1\n  steps:\n    - run: x\n", "deploy.target"},
-		{"deploy without steps", minimal + "deploy:\n  target: production\n", "deploy.steps"},
+		{"deploy path absolute", minimal + "deploy:\n  target: garage\n  path: /books/\n", "deploy.path"},
+		{"deploy path escapes", minimal + "deploy:\n  target: garage\n  path: books/../x\n", "deploy.path"},
 		{"deploy step image", minimal + "deploy:\n  target: production\n  steps:\n    - {run: x, image: foo}\n", "image"},
 		{"check without run", minimal + "deploy:\n  target: production\n  steps: [{run: x}]\n  check: {attempts: 3}\n", "deploy.check.run"},
 		{"check too many retries", minimal + "deploy:\n  target: production\n  steps: [{run: x}]\n  check: {run: y, attempts: 1000}\n", "deploy.check.attempts"},

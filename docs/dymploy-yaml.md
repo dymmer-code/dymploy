@@ -110,6 +110,7 @@ sha256 on the target before running anything**; the upload is removed at the end
 | The target does not exist or the repository may not use it | The job fails **before building**. | 4 |
 | The build fails | The job fails; nothing is deployed. | the step's |
 | A `deploy.steps` step fails | It stops; nothing is undone. | 5 |
+| A file cannot be put in the bucket of an `s3` target (or fails its read-back) | It stops there; the files already put stay. | 8 |
 | `check` fails (attempts used up) | The same. | 6 |
 | All went well, `after` fails | The job fails; the deployment stays. | 7 |
 | `deploy.timeout` runs out | The command is stopped; nothing is undone. | 124 |
@@ -137,7 +138,43 @@ targets:
       - {provider: github, owner: acme, repositories: [shop], branches: [main]}
 ```
 
-### Secrets
+### Buckets (`kind: s3`)
+
+A target is a machine reached over SSH unless it says `kind: s3`: then it is a bucket of an S3 server (Garage, MinIO,
+Amazon S3) and **no step runs anywhere**. The files of the artifact are put in the bucket, nothing else.
+
+```yaml
+targets:
+  garage-books:
+    kind: s3
+    endpoint: http://10.0.0.5:3900          # the server, path-style requests; http or https
+    bucket: books
+    region: garage                          # what the server signs for; default us-east-1
+    credentials_file: /etc/dymploy/targets/garage-books.env   # not readable by others; see below
+    allow:
+      - {provider: github, owner: acme, repositories: [book], branches: [main]}
+```
+
+`credentials_file` has two lines, `S3_ACCESS_KEY_ID=…` and `S3_SECRET_ACCESS_KEY=…`: use a key that can write only in
+that bucket. The fields of the other kind (`host`, `user`, `key_file`, `known_hosts`, `upload_dir`, `secrets`) are
+errors on a bucket, and the other way round. The definition says only where inside the bucket:
+
+```yaml
+deploy:
+  target: garage-books
+  path: books/        # optional prefix; default the root of the bucket
+```
+
+A bucket takes `target`, `path` and `timeout`; `steps`, `check`, `after` and `secrets` are refused before building (exit
+code 4), and so is `path` on a machine. What is put is every regular file of the artifact archive under the name it has
+there (each of `artifact.paths` is stored under its base name, so `out/book.pdf` becomes `<path>book.pdf`, and a directory
+keeps its tree); links and special files are skipped, and said in the log. Each file is sent with its content type and its
+SHA-256 (kept with the object), and read back to check it. A file the bucket already has with the same SHA-256 is left
+alone. **Nothing is ever deleted** in the bucket, and a failure stops at that file (exit code 8) and undoes nothing. The
+file travels from the daemon, not from the build container, so the server of the bucket only has to be reachable from the
+machine of dymploy.
+
+### Secrets (machines only)
 
 A target can say where its secrets come from. `secrets` is a command whose standard output is the content of the
 file the steps receive; dymploy treats it as opaque bytes (up to 256 KiB of text), never logs it and never parses it.
@@ -171,6 +208,6 @@ environment and with the network the file says. The Dockerfile is the repository
 
 ## Out of version 1, on purpose
 
-Secrets in the file; several targets in one file; automatic rollback; publishing to object storage; build matrices,
+Secrets in the file; several targets in one file; automatic rollback; publishing anywhere but an S3 bucket (no SFTP); build matrices,
 conditionals and including other files; templates. Each would need a version change (`version: 2`) or a backwards
 compatible extension.

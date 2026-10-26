@@ -1,0 +1,21 @@
+# A book that is published, not deployed to a machine: the target `assets` is a bucket (kind: s3 in the
+# server's configuration), so nothing runs there; the PDF and the EPUB are put in it under books/.
+version: 1
+
+build:
+  image: {from: "debian:13"}
+  steps:
+    - name: pdf
+      image: asciidoctor/docker-asciidoctor:latest
+      run: asciidoctor-pdf -o out/book.pdf book.adoc
+    - name: epub
+      image: asciidoctor/docker-asciidoctor:latest
+      run: asciidoctor-epub3 -o out/book.epub book.adoc
+
+artifact:
+  name: book
+  paths: [out/book.pdf, out/book.epub]
+
+deploy:
+  target: assets
+  path: books/

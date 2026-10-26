@@ -20,6 +20,7 @@ import (
 
 	"github.com/dymmer-code/dymploy/internal/config"
 	"github.com/dymmer-code/dymploy/internal/deploy"
+	"github.com/dymmer-code/dymploy/internal/deploy/s3store"
 	"github.com/dymmer-code/dymploy/internal/deploy/secretcmd"
 	"github.com/dymmer-code/dymploy/internal/deploy/sshremote"
 	"github.com/dymmer-code/dymploy/internal/job"
@@ -235,11 +236,11 @@ func runTry(ctx context.Context, w io.Writer, o tryOptions) error {
 	}
 	if o.deploy {
 		targets := deploy.NewTargets()
-		remote := deploy.Remote(&sshremote.Remote{})
-		if err := applyTargets(cfg, remote, targets); err != nil {
+		remote, store := deploy.Remote(&sshremote.Remote{}), deploy.Store(&s3store.Store{})
+		if err := applyTargets(cfg, remote, store, targets); err != nil {
 			return err
 		}
-		dc.Deployer = &deploy.Deployer{Remote: remote, Targets: targets, Secrets: secretcmd.New()}
+		dc.Deployer = &deploy.Deployer{Remote: remote, Store: store, Targets: targets, Secrets: secretcmd.New()}
 	}
 	r, err := docker.New(dc)
 	if err != nil {

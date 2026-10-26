@@ -20,6 +20,7 @@ import (
 	"github.com/dymmer-code/dymploy/internal/control"
 	"github.com/dymmer-code/dymploy/internal/daemon"
 	"github.com/dymmer-code/dymploy/internal/deploy"
+	"github.com/dymmer-code/dymploy/internal/deploy/s3store"
 	"github.com/dymmer-code/dymploy/internal/deploy/secretcmd"
 	"github.com/dymmer-code/dymploy/internal/deploy/sshremote"
 	"github.com/dymmer-code/dymploy/internal/intake"
@@ -58,11 +59,11 @@ func newServeCmd(version string) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			remote, targets := deploy.Remote(&sshremote.Remote{}), deploy.NewTargets()
-			if err := applyTargets(cfg, remote, targets); err != nil {
+			remote, store, targets := deploy.Remote(&sshremote.Remote{}), deploy.Store(&s3store.Store{}), deploy.NewTargets()
+			if err := applyTargets(cfg, remote, store, targets); err != nil {
 				return err
 			}
-			deployer := &deploy.Deployer{Remote: remote, Targets: targets, Secrets: secretcmd.New()}
+			deployer := &deploy.Deployer{Remote: remote, Store: store, Targets: targets, Secrets: secretcmd.New()}
 			mgr, repos, dockerRunner, closeState, err := buildQueue(cfg, log, providers, deployer)
 			if err != nil {
 				return err
@@ -88,7 +89,7 @@ func newServeCmd(version string) *cobra.Command {
 			enq := intake.New(mgr, cfg.Runner.Kind, cfg.Runner.ParamsJSON()).Fresh(tipCheck(cfg, providers, log))
 			hooks := buildReceiver(cfg, log, providers, enq)
 			jobs := queueJobs{m: mgr, log: log, providers: providers, hooks: hooks, enq: enq}
-			rl := &reloader{path: configPath, cur: cfg, hooks: hooks, remote: remote, targets: targets, mgr: mgr, log: log}
+			rl := &reloader{path: configPath, cur: cfg, hooks: hooks, remote: remote, store: store, targets: targets, mgr: mgr, log: log}
 			reloadOnSIGHUP(ctx, rl)
 			d := daemon.New(cfg, version).OnReload(rl.Reload).WithJobs(jobs)
 			if err := mountAPI(d, cfg, jobs, log); err != nil {
@@ -206,7 +207,7 @@ func mountAPI(d *daemon.Daemon, cfg *config.Config, jobs control.Jobs, log *slog
 // applyTargets turns the configured targets into the set the deployer uses. Every one is checked
 // first (its key and known_hosts must exist and be usable); a target that cannot work rejects the
 // whole set, so what is in force is never half of what was asked.
-func applyTargets(cfg *config.Config, remote deploy.Remote, into *deploy.Targets) error {
+func applyTargets(cfg *config.Config, remote deploy.Remote, store deploy.Store, into *deploy.Targets) error {
 	set := make(map[string]deploy.Target, len(cfg.Targets))
 	names := make([]string, 0, len(cfg.Targets))
 	for name := range cfg.Targets {
@@ -215,6 +216,17 @@ func applyTargets(cfg *config.Config, remote deploy.Remote, into *deploy.Targets
 	sort.Strings(names)
 	for _, name := range names {
 		tc := cfg.Targets[name]
+		if tc.Kind == config.KindS3 {
+			t := deploy.Target{
+				Name: name, Kind: deploy.KindS3, Endpoint: tc.Endpoint, Bucket: tc.Bucket, Region: tc.Region,
+				CredentialsFile: tc.CredentialsFile, Allow: webhook.Policy{Rules: rulesOf(tc.Allow)},
+			}
+			if err := store.Check(t); err != nil {
+				return fmt.Errorf("targets.%s: %w", name, err)
+			}
+			set[name] = t
+			continue
+		}
 		t := deploy.Target{
 			Name: name, Host: tc.Host, Port: tc.Port, User: tc.User, KeyFile: tc.KeyFile, KnownHosts: tc.KnownHosts,
 			UploadDir: tc.UploadDir, Allow: webhook.Policy{Rules: rulesOf(tc.Allow)},

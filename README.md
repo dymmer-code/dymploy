@@ -265,9 +265,10 @@ less. Submodules are not supported by this runner.
 
 ## Deploying
 
-If `dymploy.yaml` has a `deploy` section, the job ends with it: the artifact is delivered to the named **target** and the
-steps run there. The target is defined in the daemon's configuration (`targets`, see `examples/config/`), never in the
-repository:
+If `dymploy.yaml` has a `deploy` section, the job ends with it: the artifact is delivered to the named **target**. A
+target is a machine, where the steps run (below), or a bucket of an S3 server (`kind: s3`), where the files of the
+artifact are put: see `docs/dymploy-yaml.md`, *Buckets*. Either way the target is defined in the daemon's configuration
+(`targets`, see `examples/config/`), never in the repository. For a machine, the steps of `dymploy.yaml` run there:
 
 - `host`, `port`, `user`; `key_file` (a private key without passphrase, mode 0600 at most) and `known_hosts` (the host key
   must be listed: nothing is trusted on first use, and a changed host key is refused).

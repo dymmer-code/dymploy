@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
+	"net/url"
 	"path"
 	"path/filepath"
 	"regexp"
@@ -141,9 +142,28 @@ type APIConfig struct {
 	MaxStreams int `yaml:"max_streams"`
 }
 
-// TargetConfig is a deployment target reached over SSH. The key and the known_hosts file are paths to
-// files on this machine; nothing secret is written in the configuration itself.
+// Target kinds. A target is a machine reached over SSH, where the steps of the definition run (the default),
+// or a bucket of an S3 server, where the files of the artifact are put.
+const (
+	KindSSH = "ssh"
+	KindS3  = "s3"
+)
+
+// TargetConfig is a deployment target: a machine reached over SSH, or an S3 bucket (kind: s3). The key, the
+// known_hosts file and the credentials are paths to files on this machine; nothing secret is written in the
+// configuration itself.
 type TargetConfig struct {
+	// Kind is ssh (default) or s3. The fields of the other kind must be left out.
+	Kind string `yaml:"kind"`
+	// Only for s3: Endpoint is the URL of the S3 server (http or https, path-style requests), Bucket the bucket
+	// and Region the one the server signs for (default us-east-1). CredentialsFile holds the lines
+	// S3_ACCESS_KEY_ID=... and S3_SECRET_ACCESS_KEY=... (not readable by others): a key that can only write in
+	// that bucket.
+	Endpoint        string `yaml:"endpoint"`
+	Bucket          string `yaml:"bucket"`
+	Region          string `yaml:"region"`
+	CredentialsFile string `yaml:"credentials_file"`
+
 	Host string `yaml:"host"`
 	Port int    `yaml:"port"` // default 22
 	User string `yaml:"user"`
@@ -325,6 +345,8 @@ func (a APIConfig) validate() error {
 
 var (
 	targetNameRE = regexp.MustCompile(`^[a-z][a-z0-9-]{0,62}$`)
+	bucketRE     = regexp.MustCompile(`^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$`)
+	regionRE     = regexp.MustCompile(`^[a-z0-9-]{1,40}$`)
 	targetUserRE = regexp.MustCompile(`^[a-z_][a-z0-9_-]{0,31}$`)
 	uploadDirRE  = regexp.MustCompile(`^[A-Za-z0-9._/-]{1,200}$`)
 )
@@ -338,9 +360,23 @@ func (c *Config) validateTargets() error {
 	for _, name := range names {
 		t := c.Targets[name]
 		p := "targets." + name
-		switch {
-		case !targetNameRE.MatchString(name):
+		if !targetNameRE.MatchString(name) {
 			return fmt.Errorf("%s: the name must be lowercase letters, digits and - (it is what dymploy.yaml writes in deploy.target)", p)
+		}
+		switch t.Kind {
+		case "", KindSSH:
+			if t.Endpoint != "" || t.Bucket != "" || t.Region != "" || t.CredentialsFile != "" {
+				return fmt.Errorf("%s: endpoint, bucket, region and credentials_file are for kind: s3", p)
+			}
+		case KindS3:
+			if err := t.validateS3(p, c.Webhooks); err != nil {
+				return err
+			}
+			continue
+		default:
+			return fmt.Errorf("%s.kind %q is not valid: use ssh or s3", p, t.Kind)
+		}
+		switch {
 		case t.Host == "" || strings.ContainsAny(t.Host, " /@\t\n"):
 			return fmt.Errorf("%s.host %q is not a host name or address", p, t.Host)
 		case t.Port < 0 || t.Port > 65535:
@@ -363,6 +399,30 @@ func (c *Config) validateTargets() error {
 			if err := r.validate(c.Webhooks); err != nil {
 				return fmt.Errorf("%s.allow[%d]: %w", p, i, err)
 			}
+		}
+	}
+	return nil
+}
+
+func (t TargetConfig) validateS3(p string, webhooks map[string]WebhookConfig) error {
+	u, err := url.Parse(t.Endpoint)
+	switch {
+	case t.Host != "" || t.Port != 0 || t.User != "" || t.KeyFile != "" || t.KnownHosts != "" || t.UploadDir != "" || t.Secrets != nil:
+		return fmt.Errorf("%s: host, port, user, key_file, known_hosts, upload_dir and secrets are for kind: ssh", p)
+	case err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.User != nil || (u.Path != "" && u.Path != "/") || u.RawQuery != "":
+		return fmt.Errorf("%s.endpoint %q must be the URL of the server, such as http://10.0.0.5:3900", p, t.Endpoint)
+	case !bucketRE.MatchString(t.Bucket):
+		return fmt.Errorf("%s.bucket %q is not a bucket name", p, t.Bucket)
+	case t.Region != "" && !regionRE.MatchString(t.Region):
+		return fmt.Errorf("%s.region %q is not valid", p, t.Region)
+	case !filepath.IsAbs(t.CredentialsFile):
+		return fmt.Errorf("%s.credentials_file %q must be an absolute path", p, t.CredentialsFile)
+	case len(t.Allow) == 0:
+		return fmt.Errorf("%s.allow is required: say which repositories may deploy here", p)
+	}
+	for i, r := range t.Allow {
+		if err := r.validate(webhooks); err != nil {
+			return fmt.Errorf("%s.allow[%d]: %w", p, i, err)
 		}
 	}
 	return nil

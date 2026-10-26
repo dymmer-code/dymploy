@@ -35,6 +35,7 @@ type reloader struct {
 	log   *slog.Logger
 
 	remote  deploy.Remote
+	store   deploy.Store
 	targets *deploy.Targets
 	mgr     *queue.Manager // jobs the new policy no longer allows are stopped; nil in tests
 }
@@ -58,7 +59,7 @@ func (r *reloader) Reload() (string, error) {
 		return "", err
 	}
 	// Targets first: they can fail (missing key files), and a failure must change nothing.
-	if err := applyTargets(next, r.remote, r.targets); err != nil {
+	if err := applyTargets(next, r.remote, r.store, r.targets); err != nil {
 		err = fmt.Errorf("the previous targets stay in force: %w", err)
 		r.log.Error("configuration not reloaded", "error", err)
 		return "", err

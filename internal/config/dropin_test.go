@@ -278,6 +278,50 @@ func TestTargetValidation(t *testing.T) {
 	}
 }
 
+func bucket(extra string) string {
+	return "targets:\n  garage-books:\n    kind: s3\n    endpoint: http://10.0.0.5:3900\n    bucket: books\n    region: garage\n    credentials_file: /etc/dymploy/targets/garage-books.env\n" + extra +
+		"    allow:\n      - {provider: github, owner: globex, repositories: [shop], branches: [main]}\n"
+}
+
+func TestABucketIsATargetToo(t *testing.T) {
+	c, err := Load(layout(t, map[string]string{"config.d/10-hooks.yaml": hooks, "config.d/30.yaml": bucket(""), "config.d/31.yaml": target("")}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := c.Targets["garage-books"]
+	if b.Kind != KindS3 || b.Endpoint != "http://10.0.0.5:3900" || b.Bucket != "books" || b.Region != "garage" || b.CredentialsFile == "" {
+		t.Fatalf("%+v", b)
+	}
+	if c.Targets["production"].Kind != "" {
+		t.Fatalf("a target with no kind stays a machine: %+v", c.Targets["production"])
+	}
+}
+
+func TestBucketValidation(t *testing.T) {
+	good := bucket("")
+	for name, tc := range map[string]struct{ body, want string }{
+		"unknown kind":         {strings.Replace(good, "kind: s3", "kind: ftp", 1), "ssh or s3"},
+		"no endpoint":          {strings.Replace(good, "endpoint: http://10.0.0.5:3900", "endpoint: \"\"", 1), "endpoint"},
+		"endpoint with a path": {strings.Replace(good, "3900", "3900/x", 1), "endpoint"},
+		"endpoint with a user": {strings.Replace(good, "http://", "http://k:s@", 1), "endpoint"},
+		"endpoint not http":    {strings.Replace(good, "http://", "ftp://", 1), "endpoint"},
+		"bad bucket":           {strings.Replace(good, "bucket: books", "bucket: \"../x\"", 1), "bucket"},
+		"bad region":           {strings.Replace(good, "region: garage", "region: \"a b\"", 1), "region"},
+		"relative credentials": {strings.Replace(good, "/etc/dymploy/targets/garage-books.env", "garage.env", 1), "credentials_file"},
+		"ssh fields":           {bucket("    host: 10.0.0.20\n"), "for kind: ssh"},
+		"nobody may use it":    {strings.Split(good, "    allow:")[0], "allow is required"},
+		"a bad allow rule":     {strings.Replace(good, "repositories: [shop], ", "", 1), "allow[0]"},
+		"bucket fields on ssh": {target("    bucket: books\n"), "for kind: s3"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := Load(layout(t, map[string]string{"config.d/10-hooks.yaml": hooks, "config.d/30.yaml": tc.body}))
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("want %q, got %v", tc.want, err)
+			}
+		})
+	}
+}
+
 func TestTargetSecretsSource(t *testing.T) {
 	ok := "    secrets:\n      command: [/usr/local/bin/dym, project, shop, secrets, get, --format, dotenv]\n      env_file: /etc/dymploy/dym.env\n      timeout: 45s\n"
 	c, err := Load(layout(t, map[string]string{"config.d/10-hooks.yaml": hooks, "config.d/30.yaml": target(ok)}))

@@ -163,8 +163,11 @@ func (v *validator) deploy(d *Deploy) {
 		v.add("deploy.target", "%q is not a target name: use the name of a target configured on the dymploy server (lowercase letters, digits and -), never a host or a user", d.Target)
 	}
 	v.duration("deploy.timeout", d.Timeout, time.Second, time.Hour)
-	if len(d.Steps) == 0 {
-		v.add("deploy.steps", "at least one step is required")
+	// Whether steps are required depends on the kind of the target, which only the server knows: an ssh target
+	// needs them, an s3 one forbids them. The server checks it before building (deploy.Deployer.AuthorizeDeploy).
+	if d.Path != "" && (len(d.Path) > 300 || strings.HasPrefix(d.Path, "/") || strings.HasPrefix(d.Path, "-") ||
+		strings.ContainsAny(d.Path, "\\\x00\n") || hasDotDot(d.Path)) {
+		v.add("deploy.path", "%q is not a valid path: relative, inside the bucket", d.Path)
 	}
 	v.deploySteps("deploy.steps", d.Steps)
 	if c := d.Check; c != nil {
