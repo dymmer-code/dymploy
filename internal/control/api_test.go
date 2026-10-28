@@ -21,14 +21,15 @@ import (
 
 // fakeJobs is an in-memory Jobs.
 type fakeJobs struct {
-	mu      sync.Mutex
-	jobs    map[job.ID]job.Job
-	order   []job.ID
-	logs    map[job.ID][]job.Entry
-	subs    map[int]chan Event
-	next    int
-	cancels []job.ID
-	reasons []string
+	mu       sync.Mutex
+	jobs     map[job.ID]job.Job
+	order    []job.ID
+	logs     map[job.ID][]job.Entry
+	subs     map[int]chan Event
+	next     int
+	cancels  []job.ID
+	reasons  []string
+	enqueued []EnqueueRequest
 }
 
 func newFake() *fakeJobs {
@@ -137,6 +138,9 @@ func (f *fakeJobs) Retry(_ context.Context, id job.ID) (job.Job, error) {
 }
 
 func (f *fakeJobs) Enqueue(_ context.Context, r EnqueueRequest) (job.Job, error) {
+	f.mu.Lock()
+	f.enqueued = append(f.enqueued, r)
+	f.mu.Unlock()
 	switch r.Repo {
 	case "bad":
 		return job.Job{}, fmt.Errorf("%w: write the repository as provider/owner/repo", ErrInvalid)
@@ -713,5 +717,23 @@ func TestLiveChannelsEndWhenTheDaemonStartsToStop(t *testing.T) {
 	close(closing)
 	if _, _, err := c.Read(ctx); websocket.CloseStatus(err) != websocket.StatusGoingAway {
 		t.Fatalf("watchers are told the daemon is going away: %v", err)
+	}
+}
+
+func TestAnEnqueueCanAskForOnlyTheSecrets(t *testing.T) {
+	f := newFake()
+	srv := httptest.NewServer((&API{Jobs: f}).Handler())
+	defer srv.Close()
+	for _, body := range []string{`{"repo":"github/a/b","ref":"main"}`, `{"repo":"github/a/b","ref":"main","secrets":true}`} {
+		resp, err := http.Post(srv.URL+"/v1/queue", "application/json", strings.NewReader(body))
+		if err != nil || resp.StatusCode != 202 {
+			t.Fatalf("%v %v", err, resp)
+		}
+		resp.Body.Close()
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.enqueued) != 2 || f.enqueued[0].Secrets || !f.enqueued[1].Secrets {
+		t.Fatalf("the request must carry whether it is only about the secrets: %+v", f.enqueued)
 	}
 }

@@ -95,6 +95,12 @@ type Deploy struct {
 	Steps []DeployStep `yaml:"steps"`
 	Check *Check       `yaml:"check"`
 	After *StepList    `yaml:"after"`
+	// SecretsSteps are what `dymploy secrets` runs on the target to put new secrets in place without building
+	// or delivering anything (the file is in $DYMPLOY_SECRETS_FILE, as in steps): typically install it and
+	// restart the service. The check runs afterwards. They need `secrets: true`. SecretsUndo runs, in order,
+	// when one of them or the check fails, so a definition can put back what it replaced.
+	SecretsSteps []DeployStep `yaml:"secrets_steps"`
+	SecretsUndo  []DeployStep `yaml:"secrets_undo"`
 }
 
 // DeployStep is a command run on the target.

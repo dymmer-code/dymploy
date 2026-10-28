@@ -311,6 +311,7 @@ dymploy retry <id>               # a finished job again, as a new job
 dymploy watch [--json]           # everything, live: what is waiting or running, then every change and log line
 dymploy queue github/owner/repo --ref main [-f]   # start a job by hand (a branch or a tag); -f follows its log
 dymploy queue                    # without arguments: what is waiting and running now
+dymploy secrets github/owner/repo --ref main [-f]   # change only the target's secrets: no build, no new release
 ```
 
 `dymploy queue` is not a way around anything. The provider resolves the branch or tag to its commit (a branch is tried before a
@@ -318,6 +319,13 @@ tag; `refs/heads/…` and `refs/tags/…` are accepted), the event must pass **t
 to it at once), and the job obeys the queue's rules (`on_busy`, one job per repository, `max_pending`). It works only through
 the control socket, never through the public API, and is written to the audit log. For GitHub it needs the App
 (`app_id`/`private_key_file`) installed on the repository.
+
+`dymploy secrets` is `dymploy queue` for a different job: it checks out the commit, reads its `dymploy.yaml` and, instead of
+building, fetches the target's current secrets and runs the definition's `deploy.secrets_steps` (typically: install the file and
+restart the service) and then its `check`; if they fail, `deploy.secrets_undo` runs. It is for when only a secret changed and a
+new release would be pointless (and impossible: a commit that is already deployed cannot be deployed again). The same policy,
+queue and audit log apply, the job is named after the repository so it never runs together with a deployment of it, and a
+definition without `secrets_steps` is refused (exit code 9). See `docs/dymploy-yaml.md`.
 
 The API behind those commands is `GET /v1/jobs`, `/v1/jobs/{id}`, `/v1/jobs/{id}/logs?after=&limit=`, `POST /v1/jobs/{id}/abort`
 (body `{"reason": "…"}`) and `/retry`, and the live channel `GET /v1/events` (a WebSocket). The channel starts with a `snapshot` of the jobs waiting or

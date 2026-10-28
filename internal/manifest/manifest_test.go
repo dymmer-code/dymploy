@@ -358,3 +358,25 @@ func TestArtifactPathsMayBePatterns(t *testing.T) {
 		t.Fatalf("%v", err)
 	}
 }
+
+func TestSecretsStepsAreForChangingOnlyTheSecrets(t *testing.T) {
+	ok := minimal + "deploy:\n  target: production\n  secrets: true\n  steps: [{run: x}]\n" +
+		"  secrets_steps:\n    - {name: env, run: install-env}\n    - {name: restart, run: restart}\n  secrets_undo:\n    - {run: put-back}\n"
+	m, err := Parse([]byte(ok))
+	if err != nil || len(m.Deploy.SecretsSteps) != 2 || len(m.Deploy.SecretsUndo) != 1 || m.Deploy.SecretsSteps[1].Name != "restart" {
+		t.Fatalf("%v %+v", err, m)
+	}
+	for name, doc := range map[string]string{
+		"without secrets: true": minimal + "deploy:\n  target: production\n  steps: [{run: x}]\n  secrets_steps: [{run: y}]\n",
+		"undo without steps":    minimal + "deploy:\n  target: production\n  secrets: true\n  steps: [{run: x}]\n  secrets_undo: [{run: y}]\n",
+		"an empty command":      minimal + "deploy:\n  target: production\n  secrets: true\n  steps: [{run: x}]\n  secrets_steps: [{run: \"\"}]\n",
+	} {
+		if _, err := Parse([]byte(doc)); err == nil {
+			t.Errorf("%s must be refused", name)
+		}
+	}
+	m, err = Parse([]byte(minimal + "deploy:\n  target: production\n  steps: [{run: x}]\n"))
+	if err != nil || len(m.Deploy.SecretsSteps) != 0 {
+		t.Fatalf("a definition without secrets_steps stays valid: %v", err)
+	}
+}

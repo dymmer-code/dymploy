@@ -119,6 +119,15 @@ func (c *Client) Queue(ctx context.Context, repo, ref string) (job.Job, error) {
 	return j, err
 }
 
+// QueueSecrets starts, by hand, a job that only changes the secrets of the target that the definition of ref
+// names (no build, no new release), and returns it.
+func (c *Client) QueueSecrets(ctx context.Context, repo, ref string) (job.Job, error) {
+	body, _ := json.Marshal(EnqueueRequest{Repo: repo, Ref: ref, Secrets: true})
+	var j job.Job
+	err := c.send(ctx, http.MethodPost, "/v1/queue", body, &j)
+	return j, err
+}
+
 // Retry submits a copy of a finished job and returns it.
 func (c *Client) Retry(ctx context.Context, id string) (job.Job, error) {
 	var j job.Job

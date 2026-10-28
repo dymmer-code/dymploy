@@ -179,6 +179,14 @@ func (v *validator) deploy(d *Deploy) {
 		v.add("deploy.path", "%q is not a valid path: relative, inside the bucket", d.Path)
 	}
 	v.deploySteps("deploy.steps", d.Steps)
+	v.deploySteps("deploy.secrets_steps", d.SecretsSteps)
+	v.deploySteps("deploy.secrets_undo", d.SecretsUndo)
+	if len(d.SecretsSteps) > 0 && !d.Secrets {
+		v.add("deploy.secrets_steps", "they work on the target's secrets: set deploy.secrets to true")
+	}
+	if len(d.SecretsUndo) > 0 && len(d.SecretsSteps) == 0 {
+		v.add("deploy.secrets_undo", "there is nothing to undo without deploy.secrets_steps")
+	}
 	if c := d.Check; c != nil {
 		v.run("deploy.check.run", c.Run)
 		if c.Attempts < 1 || c.Attempts > 120 {

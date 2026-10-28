@@ -147,34 +147,7 @@ func (r *Runner) Run(ctx context.Context, t runner.Task) (runner.Result, error) 
 }
 
 // readManifest returns the manifest of the working copy, or a message for the log.
-func readManifest(dir string) (*manifest.Manifest, string) {
-	fsys := os.DirFS(dir)
-	name, err := manifest.Find(fsys)
-	if err != nil {
-		return nil, err.Error()
-	}
-	// The file comes from the repository: it must be a plain file of it, not a link to something else.
-	full := filepath.Join(dir, name)
-	fi, err := os.Lstat(full)
-	if err != nil || !fi.Mode().IsRegular() {
-		return nil, name + " must be a regular file"
-	}
-	if fi.Size() > manifest.MaxSize {
-		return nil, fmt.Sprintf("%s is too large (the limit is %d bytes)", name, manifest.MaxSize)
-	}
-	data, err := os.ReadFile(full)
-	if err != nil {
-		return nil, "reading " + name + ": " + err.Error()
-	}
-	m, err := manifest.Parse(data)
-	if err != nil {
-		return nil, name + ": " + err.Error()
-	}
-	if err := m.CheckFiles(fsys); err != nil {
-		return nil, name + ": " + err.Error()
-	}
-	return m, ""
-}
+func readManifest(dir string) (*manifest.Manifest, string) { return manifest.ReadDir(dir) }
 
 type build struct {
 	r   *Runner

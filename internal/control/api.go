@@ -49,6 +49,9 @@ type EnqueueRequest struct {
 	Repo string `json:"repo"`
 	// Ref is a branch or tag name, or a full reference.
 	Ref string `json:"ref"`
+	// Secrets asks for a job that only changes the secrets of the target the definition at Ref names: no
+	// build and no new release (deploy.secrets_steps of that definition run).
+	Secrets bool `json:"secrets,omitempty"`
 }
 
 // Errors of Enqueue. The API answers 400 and 403.
@@ -258,7 +261,7 @@ func (a *API) enqueue(w http.ResponseWriter, r *http.Request) {
 	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4<<10))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&req); err != nil || req.Repo == "" || req.Ref == "" {
-		reply(w, http.StatusBadRequest, map[string]string{"error": "send {\"repo\": \"provider/owner/repository\", \"ref\": \"branch or tag\"}"})
+		reply(w, http.StatusBadRequest, map[string]string{"error": "send {\"repo\": \"provider/owner/repository\", \"ref\": \"branch or tag\"} (and \"secrets\": true to change only the secrets)"})
 		return
 	}
 	j, err := a.Jobs.Enqueue(r.Context(), req)

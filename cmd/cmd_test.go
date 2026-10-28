@@ -1530,3 +1530,24 @@ func TestRunsAreCalledByTheirNumber(t *testing.T) {
 	}
 	_ = addr
 }
+
+func TestSecretsCommandAsksForAJobThatChangesOnlyTheSecrets(t *testing.T) {
+	sock := filepath.Join(tmpDir(t), "c.sock")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	jobs := &stubJobs{}
+	ready := make(chan struct{})
+	go control.Serve(ctx, sock, control.Handlers{Status: func() control.Status { return control.Status{} }, Jobs: jobs}, func() { close(ready) })
+	<-ready
+
+	out, _, err := run(t, ctx, "secrets", "github/acme/app", "--ref", "main", "--socket", sock)
+	if err != nil || !strings.Contains(out, "queued the change of secrets") || len(jobs.queued) != 1 || !jobs.queued[0].Secrets || jobs.queued[0].Ref != "main" {
+		t.Fatalf("%v %q %+v", err, out, jobs.queued)
+	}
+	if _, _, err := run(t, ctx, "secrets", "github/acme/app", "--socket", sock); err == nil || !strings.Contains(err.Error(), "--ref is required") {
+		t.Fatalf("%v", err)
+	}
+	if _, _, err := run(t, ctx, "secrets", "--ref", "main", "--socket", sock); err == nil {
+		t.Fatal("it needs a repository")
+	}
+}

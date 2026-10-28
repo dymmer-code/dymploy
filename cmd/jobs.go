@@ -30,6 +30,8 @@ type queueJobs struct {
 	providers map[string]provider.Provider
 	hooks     *webhook.Receiver
 	enq       *intake.Enqueuer
+	// secretsEnq makes the jobs that only change the secrets of a target (control.EnqueueRequest.Secrets).
+	secretsEnq *intake.Enqueuer
 }
 
 func (q queueJobs) List(ctx context.Context, f job.Filter) ([]job.Job, error) {
@@ -86,8 +88,15 @@ func (q queueJobs) Enqueue(ctx context.Context, r control.EnqueueRequest) (job.J
 		q.log.Warn("audit: manual job refused by the policy", "repo", ev.FullName, "ref", ev.Ref, "reason", why)
 		return job.Job{}, fmt.Errorf("%w: the policy does not allow it (%s)", control.ErrForbidden, why)
 	}
-	j, err := q.enq.Submit(ctx, *ev)
-	q.log.Info("audit: job started by hand through the control socket", "repo", ev.FullName, "ref", ev.Ref, "commit", ev.Commit, "job", j.ID, "ok", err == nil)
+	enq, what := q.enq, "job"
+	if r.Secrets {
+		if q.secretsEnq == nil {
+			return job.Job{}, fmt.Errorf("%w: this server cannot run jobs that change only the secrets", control.ErrInvalid)
+		}
+		enq, what = q.secretsEnq, "secrets job"
+	}
+	j, err := enq.Submit(ctx, *ev)
+	q.log.Info("audit: "+what+" started by hand through the control socket", "repo", ev.FullName, "ref", ev.Ref, "commit", ev.Commit, "job", j.ID, "ok", err == nil)
 	return j, conflict(err)
 }
 
@@ -512,6 +521,51 @@ Without arguments it shows what is waiting and running now.`,
 	}
 	socketFlags(c, &configPath, &socket)
 	c.Flags().StringVar(&ref, "ref", "", "branch or tag to build (or a full refs/heads/… / refs/tags/…)")
+	c.Flags().BoolVarP(&follow, "follow", "f", false, "follow the job's log until it ends")
+	return c
+}
+
+func newSecretsCmd() *cobra.Command {
+	var configPath, socket, ref string
+	var follow bool
+	c := &cobra.Command{
+		Use:   "secrets provider/owner/repo --ref <branch-or-tag>",
+		Short: "Change only the secrets of a target: no build, no new release",
+		Long: `Resolves the reference to its commit, applies the same policy as a webhook and queues a job that fetches
+the target's current secrets and runs the deploy.secrets_steps of that commit's dymploy.yaml (typically install
+them and restart the service), then its health check. Nothing is built and the release on the target stays as
+it is. If a step or the check fails, deploy.secrets_undo runs, if the definition has it.
+
+The job obeys the queue's rules like any other: one job per repository, on_busy, limits. A definition without
+deploy.secrets_steps is refused. The steps are the ones of the commit you name: use the branch that is deployed.`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(c *cobra.Command, args []string) error {
+			if ref == "" {
+				return errors.New("--ref is required: a branch or a tag (for example --ref main)")
+			}
+			cl, err := clientFor(socket, configPath)
+			if err != nil {
+				return err
+			}
+			out := c.OutOrStdout()
+			j, err := cl.QueueSecrets(c.Context(), args[0], ref)
+			if err != nil {
+				return err
+			}
+			fmt.Fprintf(out, "queued the change of secrets %s at %s (%s)\n", runName(j), ref, j.ID)
+			if !follow {
+				return nil
+			}
+			return cl.Watch(c.Context(), string(j.ID), 0, func(m control.Message) error {
+				if m.Type == "output" && m.Entry != nil {
+					fmt.Fprintln(out, entryLine(*m.Entry))
+				}
+				return nil
+			})
+		},
+	}
+	socketFlags(c, &configPath, &socket)
+	c.Flags().StringVar(&ref, "ref", "", "branch or tag whose dymploy.yaml says what to do (or a full refs/heads/… / refs/tags/…)")
 	c.Flags().BoolVarP(&follow, "follow", "f", false, "follow the job's log until it ends")
 	return c
 }

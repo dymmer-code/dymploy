@@ -38,6 +38,8 @@ deploy:                     # optional; without it the job only builds
   steps: [{name, run, env}]
   check: {run, attempts, interval, timeout}
   after: {steps: […]}       # optional
+  secrets_steps: [{name, run, env}]   # optional: what `dymploy secrets` runs to change only the secrets (needs secrets: true)
+  secrets_undo: [{name, run, env}]    # optional: put back what secrets_steps replaced if they or the check fail
 ```
 
 A job with **neither `artifact` nor `deploy`** only checks the code (tests, linters): it builds, runs its steps and
@@ -105,7 +107,16 @@ sha256 on the target before running anything**; the upload is removed at the end
   `timeout` per attempt (1s–10m, default 10s). If no attempt succeeds the deployment fails.
 - **`after`** (optional): runs only if everything went well. If it fails the job is marked failed, but the deployment is
   already done and is left alone.
-- **`timeout`**: for the whole deployment (default 10m, at most 1h).
+- **`secrets_steps`** and **`secrets_undo`** (optional, ssh targets with `secrets: true`): the commands that
+  `dymploy secrets <repository> --ref <branch>` runs to put **new secrets** in place **without building or delivering
+  anything**: the release already on the target stays as it is. dymploy fetches the target's current secrets, uploads
+  them (mode 0600, SHA-256 verified) and runs `secrets_steps` in order with the same variables as `steps` except the
+  artifact ones, so `$DYMPLOY_SECRETS_FILE` is there; then `check` runs. Typically they install the file and restart the
+  service. If a step or the check fails, `secrets_undo` runs in order (it is the definition's way to put back what it
+  replaced: keep the previous file in the first step and restore it there); without it the log says nothing was undone.
+  A definition without `secrets_steps` is refused (exit code 9). The steps are those of the commit you name: use the branch
+  that is deployed. The job goes through the same queue and policy as a deployment.
+- **`timeout`**: for the whole deployment (default 10m, at most 1h; it also bounds `dymploy secrets`).
 - **There is no automatic rollback**: if something fails, whatever the steps did stays as it is, and the log says so.
 - If a job is stopped in the middle of a deployment, the remote command receives TERM and then KILL. OpenSSH delivers the
   signal to the command's shell, not to its whole tree, so steps should be short and safe to repeat.
@@ -173,7 +184,7 @@ deploy:
   path: books/        # optional prefix; default the root of the bucket
 ```
 
-A bucket takes `target`, `path` and `timeout`; `steps`, `check`, `after` and `secrets` are refused before building (exit
+A bucket takes `target`, `path` and `timeout`; `steps`, `check`, `after`, `secrets` and `secrets_steps` are refused before building (exit
 code 4), and so is `path` on a machine. What is put is every regular file of the artifact archive under the name it has
 there (each of `artifact.paths` is stored under its base name, so `out/book.pdf` becomes `<path>book.pdf`, and a directory
 keeps its tree); links and special files are skipped, and said in the log. Each file is sent with its content type and its

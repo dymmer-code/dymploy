@@ -162,8 +162,8 @@ func (d *Deployer) AuthorizeDeploy(def *manifest.Deploy, ev provider.Event) (Tar
 		switch {
 		case d.Store == nil:
 			return Target{}, fmt.Errorf("target %q is a bucket and this server cannot put files in buckets", def.Target)
-		case len(def.Steps) > 0 || def.Check != nil || def.After != nil || def.Secrets:
-			return Target{}, fmt.Errorf("target %q is a bucket: the deploy of its definitions takes target and path only (no steps, check, after or secrets)", def.Target)
+		case len(def.Steps) > 0 || def.Check != nil || def.After != nil || def.Secrets || len(def.SecretsSteps) > 0:
+			return Target{}, fmt.Errorf("target %q is a bucket: the deploy of its definitions takes target and path only (no steps, check, after, secrets or secrets_steps)", def.Target)
 		}
 		return t, nil
 	}

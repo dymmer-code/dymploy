@@ -32,6 +32,7 @@ import (
 	"github.com/dymmer-code/dymploy/internal/runner/clone"
 	"github.com/dymmer-code/dymploy/internal/runner/docker"
 	"github.com/dymmer-code/dymploy/internal/runner/dryrun"
+	"github.com/dymmer-code/dymploy/internal/runner/secretsjob"
 	"github.com/dymmer-code/dymploy/internal/secret"
 	"github.com/dymmer-code/dymploy/internal/webhook"
 )
@@ -88,7 +89,8 @@ func newServeCmd(version string) *cobra.Command {
 
 			enq := intake.New(mgr, cfg.Runner.Kind, cfg.Runner.ParamsJSON()).Fresh(tipCheck(cfg, providers, log))
 			hooks := buildReceiver(cfg, log, providers, enq)
-			jobs := queueJobs{m: mgr, log: log, providers: providers, hooks: hooks, enq: enq}
+			secretsEnq := intake.New(mgr, secretsjob.Kind, nil)
+			jobs := queueJobs{m: mgr, log: log, providers: providers, hooks: hooks, enq: enq, secretsEnq: secretsEnq}
 			rl := &reloader{path: configPath, cur: cfg, hooks: hooks, remote: remote, store: store, targets: targets, mgr: mgr, log: log}
 			reloadOnSIGHUP(ctx, rl)
 			d := daemon.New(cfg, version).OnReload(rl.Reload).WithJobs(jobs)
@@ -138,6 +140,12 @@ func buildQueue(cfg *config.Config, log *slog.Logger, providers map[string]provi
 		}
 		cl := clone.New(repos, finder)
 		runners.MustRegister(clone.Kind, cl)
+		// Changing only the secrets needs the working copy (for the definition) but not the container engine.
+		sj, err := secretsjob.New(secretsjob.Config{Source: cloneSource(cl), Deployer: deployer})
+		if err != nil {
+			return nil, nil, nil, nil, err
+		}
+		runners.MustRegister(secretsjob.Kind, sj)
 		dr, err := registerDocker(runners, cl, cfg, deployer)
 		switch {
 		case err != nil && cfg.Runner.Kind == docker.Kind:
@@ -254,6 +262,18 @@ func rulesOf(in []config.PolicyRule) []webhook.Rule {
 	return rules
 }
 
+// cloneSource is how the runners that work on a checkout obtain it: through the clone runner, which decides what an
+// event means and how its repository is fetched.
+func cloneSource(cl *clone.Runner) func(ctx context.Context, t runner.Task) (string, func(), provider.Event, error) {
+	return func(ctx context.Context, t runner.Task) (string, func(), provider.Event, error) {
+		co, ev, err := cl.Prepare(ctx, t)
+		if err != nil {
+			return "", nil, ev, err
+		}
+		return co.Dir, co.Release, ev, nil
+	}
+}
+
 // registerDocker adds the build runner, which needs the docker command and works on top of the clone
 // runner's checkouts. The engine itself is only contacted when a job runs.
 func registerDocker(runners *runner.Registry, cl *clone.Runner, cfg *config.Config, deployer *deploy.Deployer) (*docker.Runner, error) {
@@ -264,15 +284,8 @@ func registerDocker(runners *runner.Registry, cl *clone.Runner, cfg *config.Conf
 	if err != nil {
 		return nil, err
 	}
-	source := func(ctx context.Context, t runner.Task) (string, func(), provider.Event, error) {
-		co, ev, err := cl.Prepare(ctx, t)
-		if err != nil {
-			return "", nil, ev, err
-		}
-		return co.Dir, co.Release, ev, nil
-	}
 	run, err := docker.New(docker.Config{
-		Engine: engine, Source: source, Deployer: deployer,
+		Engine: engine, Source: cloneSource(cl), Deployer: deployer,
 		ArtifactsDir: filepath.Join(cfg.DataDir, "artifacts"), CacheDir: filepath.Join(cfg.DataDir, "cache"),
 		User: strconv.Itoa(os.Getuid()) + ":" + strconv.Itoa(os.Getgid()),
 	})
