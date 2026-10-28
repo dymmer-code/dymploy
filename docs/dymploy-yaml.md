@@ -158,6 +158,7 @@ targets:
     bucket: books
     region: garage                          # what the server signs for; default us-east-1
     credentials_file: /etc/dymploy/targets/garage-books.env   # not readable by others; see below
+    cache_control: public, max-age=300      # optional: the Cache-Control header every object is stored with
     allow:
       - {provider: github, owner: acme, repositories: [book], branches: [main]}
 ```
@@ -176,8 +177,10 @@ A bucket takes `target`, `path` and `timeout`; `steps`, `check`, `after` and `se
 code 4), and so is `path` on a machine. What is put is every regular file of the artifact archive under the name it has
 there (each of `artifact.paths` is stored under its base name, so `out/book.pdf` becomes `<path>book.pdf`, and a directory
 keeps its tree); links and special files are skipped, and said in the log. Each file is sent with its content type and its
-SHA-256 (kept with the object), and read back to check it. A file the bucket already has with the same SHA-256 is left
-alone. **Nothing is ever deleted** in the bucket, and a failure stops at that file (exit code 8) and undoes nothing. The
+SHA-256 (kept with the object), and read back to check it, and with the target's `cache_control` if it has one. Pages
+(`.html` and `.htm`) are put after everything else, so a page never goes up before the files it refers to, which makes
+a bucket that serves a site safe to publish to. A file the bucket already has with the same SHA-256 (and the same
+`cache_control`, when the target sets one) is left alone. **Nothing is ever deleted** in the bucket, and a failure stops at that file (exit code 8) and undoes nothing. The
 file travels from the daemon, not from the build container, so the server of the bucket only has to be reachable from the
 machine of dymploy.
 

@@ -25,6 +25,7 @@ targets:
     bucket: assets
     region: garage
     credentials_file: /etc/dymploy/targets/assets.env
+    cache_control: public, max-age=300     # optional, for buckets that serve a site
     allow:
       - provider: github
         owner: globex

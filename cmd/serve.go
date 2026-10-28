@@ -219,7 +219,7 @@ func applyTargets(cfg *config.Config, remote deploy.Remote, store deploy.Store, 
 		if tc.Kind == config.KindS3 {
 			t := deploy.Target{
 				Name: name, Kind: deploy.KindS3, Endpoint: tc.Endpoint, Bucket: tc.Bucket, Region: tc.Region,
-				CredentialsFile: tc.CredentialsFile, Allow: webhook.Policy{Rules: rulesOf(tc.Allow)},
+				CredentialsFile: tc.CredentialsFile, CacheControl: tc.CacheControl, Allow: webhook.Policy{Rules: rulesOf(tc.Allow)},
 			}
 			if err := store.Check(t); err != nil {
 				return fmt.Errorf("targets.%s: %w", name, err)

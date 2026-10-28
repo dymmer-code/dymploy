@@ -212,3 +212,21 @@ func TestPublishOfAnEmptyArtifactDoesNothingAndSucceeds(t *testing.T) {
 		t.Fatalf("log:\n%s", strings.Join(p.logs, "\n"))
 	}
 }
+
+func TestPublishPutsThePagesAfterEverythingElse(t *testing.T) {
+	p := newPub()
+	code, err := p.run(t, []entry{
+		{name: "index.html", body: "<a href=a.css>"}, {name: "a.css", body: "body{}"},
+		{name: "docs", typeflag: tar.TypeDir}, {name: "docs/page.HTM", body: "<p>"}, {name: "img.png", body: "PNG"},
+		{name: "link", typeflag: tar.TypeSymlink, body: "a.css"},
+	}, "deploy:\n  target: garage-books\n")
+	if err != nil || code != 0 {
+		t.Fatalf("code=%d err=%v\n%s", code, err, strings.Join(p.logs, "\n"))
+	}
+	if got := strings.Join(p.store.Puts, " "); got != "a.css img.png index.html docs/page.HTM" {
+		t.Fatalf("order of the puts: %s", got)
+	}
+	if n := strings.Count(strings.Join(p.logs, "\n"), "skipped link"); n != 1 {
+		t.Fatalf("what is skipped is said once, not %d times", n)
+	}
+}

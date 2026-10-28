@@ -163,6 +163,9 @@ type TargetConfig struct {
 	Bucket          string `yaml:"bucket"`
 	Region          string `yaml:"region"`
 	CredentialsFile string `yaml:"credentials_file"`
+	// CacheControl, also only for s3, is the Cache-Control header every object is stored with (for example
+	// "public, max-age=300" for a site that is served from the bucket). Empty stores none.
+	CacheControl string `yaml:"cache_control"`
 
 	Host string `yaml:"host"`
 	Port int    `yaml:"port"` // default 22
@@ -365,8 +368,8 @@ func (c *Config) validateTargets() error {
 		}
 		switch t.Kind {
 		case "", KindSSH:
-			if t.Endpoint != "" || t.Bucket != "" || t.Region != "" || t.CredentialsFile != "" {
-				return fmt.Errorf("%s: endpoint, bucket, region and credentials_file are for kind: s3", p)
+			if t.Endpoint != "" || t.Bucket != "" || t.Region != "" || t.CredentialsFile != "" || t.CacheControl != "" {
+				return fmt.Errorf("%s: endpoint, bucket, region, credentials_file and cache_control are for kind: s3", p)
 			}
 		case KindS3:
 			if err := t.validateS3(p, c.Webhooks); err != nil {
@@ -417,6 +420,8 @@ func (t TargetConfig) validateS3(p string, webhooks map[string]WebhookConfig) er
 		return fmt.Errorf("%s.region %q is not valid", p, t.Region)
 	case !filepath.IsAbs(t.CredentialsFile):
 		return fmt.Errorf("%s.credentials_file %q must be an absolute path", p, t.CredentialsFile)
+	case len(t.CacheControl) > 256 || strings.ContainsAny(t.CacheControl, "\r\n\x00"):
+		return fmt.Errorf("%s.cache_control must be a header value of one line, up to 256 characters", p)
 	case len(t.Allow) == 0:
 		return fmt.Errorf("%s.allow is required: say which repositories may deploy here", p)
 	}

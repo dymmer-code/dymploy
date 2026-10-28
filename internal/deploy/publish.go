@@ -60,74 +60,91 @@ func (d *Deployer) publish(ctx context.Context, r Request, ended func(error) (in
 		return ended(fmt.Errorf("opening target %s: %w", t.Name, err))
 	}
 
-	f, err := os.Open(r.File)
-	if err != nil {
-		return 0, fmt.Errorf("opening the artifact: %w", err)
-	}
-	defer f.Close()
-	gz, err := gzip.NewReader(f)
-	if err != nil {
-		return 0, fmt.Errorf("reading the artifact: %w", err)
-	}
-	defer gz.Close()
-	tr := tar.NewReader(gz)
-
 	put, same := 0, 0
-	for {
-		h, err := tr.Next()
-		if errors.Is(err, io.EOF) {
-			break
-		}
+	// walk reads the artifact once and handles its pages (.html and .htm) or everything else. Pages go in a
+	// second pass: a page published before the files it refers to would be broken until they arrive.
+	walk := func(pages bool) (code int, stop bool, err error) {
+		f, err := os.Open(r.File)
 		if err != nil {
-			return ended(fmt.Errorf("reading the artifact: %w", err))
+			return 0, true, fmt.Errorf("opening the artifact: %w", err)
 		}
-		name := path.Clean(strings.TrimPrefix(h.Name, "./"))
-		switch {
-		case h.Typeflag == tar.TypeDir:
-			continue
-		case h.Typeflag != tar.TypeReg:
-			log.System(fmt.Sprintf("skipped %s: not a regular file", name))
-			continue
-		case name == "." || path.IsAbs(name) || name == ".." || strings.HasPrefix(name, "../"):
-			log.System(fmt.Sprintf("the artifact has an unsafe name %q: nothing more was published", h.Name))
-			return ExitPublish, nil
-		}
-		key := prefix + name
-		sum, size, tmp, err := spool(tr)
+		defer f.Close()
+		gz, err := gzip.NewReader(f)
 		if err != nil {
-			return ended(fmt.Errorf("reading %s from the artifact: %w", name, err))
+			return 0, true, fmt.Errorf("reading the artifact: %w", err)
 		}
-		written, perr := b.Put(ctx, key, contentType(name), sum, size, tmp)
-		tmp.Close()
-		os.Remove(tmp.Name())
-		if perr != nil {
-			if ctx.Err() != nil {
-				return ended(perr)
+		defer gz.Close()
+		tr := tar.NewReader(gz)
+		for {
+			h, err := tr.Next()
+			if errors.Is(err, io.EOF) {
+				return 0, false, nil
 			}
-			log.System(fmt.Sprintf("could not put %s: %v", key, perr))
-			d.noPublishUndo(r, put)
-			return ExitPublish, nil
-		}
-		if !written {
-			same++
-			log.System(fmt.Sprintf("unchanged %s (sha256 %s)", key, sum[:12]))
-			continue
-		}
-		got, serr := b.Sum(ctx, key)
-		if serr != nil && ctx.Err() != nil {
-			return ended(serr)
-		}
-		if serr != nil || got != sum {
-			why := "SHA-256 differs"
-			if serr != nil {
-				why = serr.Error()
+			if err != nil {
+				c, e := ended(fmt.Errorf("reading the artifact: %w", err))
+				return c, true, e
 			}
-			log.System(fmt.Sprintf("could not verify %s after putting it: %s", key, why))
-			d.noPublishUndo(r, put)
-			return ExitPublish, nil
+			name := path.Clean(strings.TrimPrefix(h.Name, "./"))
+			switch {
+			case h.Typeflag == tar.TypeDir:
+				continue
+			case h.Typeflag != tar.TypeReg:
+				if !pages {
+					log.System(fmt.Sprintf("skipped %s: not a regular file", name))
+				}
+				continue
+			case name == "." || path.IsAbs(name) || name == ".." || strings.HasPrefix(name, "../"):
+				log.System(fmt.Sprintf("the artifact has an unsafe name %q: nothing more was published", h.Name))
+				return ExitPublish, true, nil
+			}
+			if ext := strings.ToLower(path.Ext(name)); (ext == ".html" || ext == ".htm") != pages {
+				continue
+			}
+			key := prefix + name
+			sum, size, tmp, err := spool(tr)
+			if err != nil {
+				c, e := ended(fmt.Errorf("reading %s from the artifact: %w", name, err))
+				return c, true, e
+			}
+			written, perr := b.Put(ctx, key, contentType(name), sum, size, tmp)
+			tmp.Close()
+			os.Remove(tmp.Name())
+			if perr != nil {
+				if ctx.Err() != nil {
+					c, e := ended(perr)
+					return c, true, e
+				}
+				log.System(fmt.Sprintf("could not put %s: %v", key, perr))
+				d.noPublishUndo(r, put)
+				return ExitPublish, true, nil
+			}
+			if !written {
+				same++
+				log.System(fmt.Sprintf("unchanged %s (sha256 %s)", key, sum[:12]))
+				continue
+			}
+			got, serr := b.Sum(ctx, key)
+			if serr != nil && ctx.Err() != nil {
+				c, e := ended(serr)
+				return c, true, e
+			}
+			if serr != nil || got != sum {
+				why := "SHA-256 differs"
+				if serr != nil {
+					why = serr.Error()
+				}
+				log.System(fmt.Sprintf("could not verify %s after putting it: %s", key, why))
+				d.noPublishUndo(r, put)
+				return ExitPublish, true, nil
+			}
+			put++
+			log.System(fmt.Sprintf("put %s (%d bytes, sha256 %s, verified)", key, size, sum[:12]))
 		}
-		put++
-		log.System(fmt.Sprintf("put %s (%d bytes, sha256 %s, verified)", key, size, sum[:12]))
+	}
+	for _, pages := range []bool{false, true} {
+		if code, stop, err := walk(pages); stop {
+			return code, err
+		}
 	}
 	log.System(fmt.Sprintf("published to %s: %d put, %d unchanged", t.Name, put, same))
 	return 0, nil

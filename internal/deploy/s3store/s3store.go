@@ -101,7 +101,7 @@ func (s *Store) Open(_ context.Context, t deploy.Target) (deploy.Bucket, error) 
 	if now == nil {
 		now = time.Now
 	}
-	return &bucket{client: client, base: base, name: t.Bucket, region: region, cred: c, now: now}, nil
+	return &bucket{client: client, base: base, name: t.Bucket, region: region, cred: c, now: now, cache: t.CacheControl}, nil
 }
 
 type bucket struct {
@@ -111,6 +111,8 @@ type bucket struct {
 	region string
 	cred   credentials
 	now    func() time.Time
+	// cache is the Cache-Control every object is stored with ('' stores none).
+	cache string
 }
 
 // escape encodes one path segment the way Signature Version 4 wants: everything but the unreserved characters.
@@ -243,7 +245,8 @@ func (b *bucket) Put(ctx context.Context, key, contentType, sha string, size int
 		return false, err
 	}
 	resp.Body.Close()
-	if resp.StatusCode == http.StatusOK && resp.Header.Get("X-Amz-Meta-Sha256") == sha {
+	// Same content is left alone, unless the object lacks the Cache-Control this target now asks for.
+	if resp.StatusCode == http.StatusOK && resp.Header.Get("X-Amz-Meta-Sha256") == sha && (b.cache == "" || resp.Header.Get("Cache-Control") == b.cache) {
 		return false, nil
 	}
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNotFound {
@@ -253,7 +256,11 @@ func (b *bucket) Put(ctx context.Context, key, contentType, sha string, size int
 	if _, err := body.Seek(0, io.SeekStart); err != nil {
 		return false, err
 	}
-	put, err := b.request(ctx, http.MethodPut, key, sha, map[string]string{"content-type": contentType, "x-amz-meta-sha256": sha}, body, size)
+	hdr := map[string]string{"content-type": contentType, "x-amz-meta-sha256": sha}
+	if b.cache != "" {
+		hdr["cache-control"] = b.cache
+	}
+	put, err := b.request(ctx, http.MethodPut, key, sha, hdr, body, size)
 	if err != nil {
 		return false, err
 	}

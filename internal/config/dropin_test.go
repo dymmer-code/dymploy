@@ -297,21 +297,33 @@ func TestABucketIsATargetToo(t *testing.T) {
 	}
 }
 
+func TestABucketMayAskForACacheControl(t *testing.T) {
+	c, err := Load(layout(t, map[string]string{"config.d/10-hooks.yaml": hooks, "config.d/30.yaml": bucket("    cache_control: \"public, max-age=300\"\n")}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := c.Targets["garage-books"].CacheControl; got != "public, max-age=300" {
+		t.Fatalf("%q", got)
+	}
+}
+
 func TestBucketValidation(t *testing.T) {
 	good := bucket("")
 	for name, tc := range map[string]struct{ body, want string }{
-		"unknown kind":         {strings.Replace(good, "kind: s3", "kind: ftp", 1), "ssh or s3"},
-		"no endpoint":          {strings.Replace(good, "endpoint: http://10.0.0.5:3900", "endpoint: \"\"", 1), "endpoint"},
-		"endpoint with a path": {strings.Replace(good, "3900", "3900/x", 1), "endpoint"},
-		"endpoint with a user": {strings.Replace(good, "http://", "http://k:s@", 1), "endpoint"},
-		"endpoint not http":    {strings.Replace(good, "http://", "ftp://", 1), "endpoint"},
-		"bad bucket":           {strings.Replace(good, "bucket: books", "bucket: \"../x\"", 1), "bucket"},
-		"bad region":           {strings.Replace(good, "region: garage", "region: \"a b\"", 1), "region"},
-		"relative credentials": {strings.Replace(good, "/etc/dymploy/targets/garage-books.env", "garage.env", 1), "credentials_file"},
-		"ssh fields":           {bucket("    host: 10.0.0.20\n"), "for kind: ssh"},
-		"nobody may use it":    {strings.Split(good, "    allow:")[0], "allow is required"},
-		"a bad allow rule":     {strings.Replace(good, "repositories: [shop], ", "", 1), "allow[0]"},
-		"bucket fields on ssh": {target("    bucket: books\n"), "for kind: s3"},
+		"unknown kind":               {strings.Replace(good, "kind: s3", "kind: ftp", 1), "ssh or s3"},
+		"no endpoint":                {strings.Replace(good, "endpoint: http://10.0.0.5:3900", "endpoint: \"\"", 1), "endpoint"},
+		"endpoint with a path":       {strings.Replace(good, "3900", "3900/x", 1), "endpoint"},
+		"endpoint with a user":       {strings.Replace(good, "http://", "http://k:s@", 1), "endpoint"},
+		"endpoint not http":          {strings.Replace(good, "http://", "ftp://", 1), "endpoint"},
+		"bad bucket":                 {strings.Replace(good, "bucket: books", "bucket: \"../x\"", 1), "bucket"},
+		"bad region":                 {strings.Replace(good, "region: garage", "region: \"a b\"", 1), "region"},
+		"relative credentials":       {strings.Replace(good, "/etc/dymploy/targets/garage-books.env", "garage.env", 1), "credentials_file"},
+		"ssh fields":                 {bucket("    host: 10.0.0.20\n"), "for kind: ssh"},
+		"nobody may use it":          {strings.Split(good, "    allow:")[0], "allow is required"},
+		"a bad allow rule":           {strings.Replace(good, "repositories: [shop], ", "", 1), "allow[0]"},
+		"bucket fields on ssh":       {target("    bucket: books\n"), "for kind: s3"},
+		"cache control on ssh":       {target("    cache_control: no-cache\n"), "for kind: s3"},
+		"cache control of two lines": {bucket("    cache_control: \"a\\nb\"\n"), "cache_control"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			_, err := Load(layout(t, map[string]string{"config.d/10-hooks.yaml": hooks, "config.d/30.yaml": tc.body}))

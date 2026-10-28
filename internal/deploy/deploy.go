@@ -57,6 +57,7 @@ type Target struct {
 	Bucket          string
 	Region          string
 	CredentialsFile string
+	CacheControl    string
 
 	Host       string
 	Port       int

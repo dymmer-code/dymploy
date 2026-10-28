@@ -38,6 +38,7 @@ type object struct {
 	body []byte
 	meta string
 	typ  string
+	cc   string
 }
 
 // fakeS3 keeps objects in memory and records the requests it saw.
@@ -62,6 +63,9 @@ func (f *fakeS3) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		w.Header().Set("X-Amz-Meta-Sha256", o.meta)
+		if o.cc != "" {
+			w.Header().Set("Cache-Control", o.cc)
+		}
 		if r.Method == http.MethodGet {
 			w.Write(o.body)
 		}
@@ -77,13 +81,15 @@ func (f *fakeS3) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusBadRequest)
 			return
 		}
-		f.objects[r.URL.Path] = object{body: body, meta: r.Header.Get("X-Amz-Meta-Sha256"), typ: r.Header.Get("Content-Type")}
+		f.objects[r.URL.Path] = object{body: body, meta: r.Header.Get("X-Amz-Meta-Sha256"), typ: r.Header.Get("Content-Type"), cc: r.Header.Get("Cache-Control")}
 	default:
 		w.WriteHeader(http.StatusMethodNotAllowed)
 	}
 }
 
-func setup(t *testing.T) (*fakeS3, deploy.Bucket) {
+func setup(t *testing.T) (*fakeS3, deploy.Bucket) { return setupCache(t, "") }
+
+func setupCache(t *testing.T, cache string) (*fakeS3, deploy.Bucket) {
 	t.Helper()
 	f := &fakeS3{objects: map[string]object{}}
 	srv := httptest.NewServer(f)
@@ -92,7 +98,7 @@ func setup(t *testing.T) (*fakeS3, deploy.Bucket) {
 	if err := os.WriteFile(cred, []byte("# key\nS3_ACCESS_KEY_ID=AKTEST\nS3_SECRET_ACCESS_KEY=the-secret\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	b, err := (&Store{}).Open(context.Background(), deploy.Target{Kind: deploy.KindS3, Endpoint: srv.URL, Bucket: "books", Region: "garage", CredentialsFile: cred})
+	b, err := (&Store{}).Open(context.Background(), deploy.Target{Kind: deploy.KindS3, Endpoint: srv.URL, Bucket: "books", Region: "garage", CredentialsFile: cred, CacheControl: cache})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -181,5 +187,31 @@ func TestCredentialsMustBePrivateAndComplete(t *testing.T) {
 	}
 	if err := s.Check(deploy.Target{CredentialsFile: filepath.Join(dir, "nope")}); err == nil {
 		t.Fatal("a missing file must be refused")
+	}
+}
+
+func TestPutStoresTheCacheControlOfTheTargetAndFixesWhatLacksIt(t *testing.T) {
+	f, b := setupCache(t, "public, max-age=300")
+	ctx := context.Background()
+	data := "<html></html>"
+	if w, err := b.Put(ctx, "index.html", "text/html", sum(data), int64(len(data)), strings.NewReader(data)); err != nil || !w {
+		t.Fatalf("written=%v err=%v", w, err)
+	}
+	if got := f.objects["/books/index.html"].cc; got != "public, max-age=300" {
+		t.Fatalf("stored with %q", got)
+	}
+	// the same content with the same Cache-Control is left alone ...
+	if w, err := b.Put(ctx, "index.html", "text/html", sum(data), int64(len(data)), strings.NewReader(data)); err != nil || w {
+		t.Fatalf("written=%v err=%v", w, err)
+	}
+	// ... but the same content stored without it (by something else) is put again.
+	o := f.objects["/books/index.html"]
+	o.cc = ""
+	f.objects["/books/index.html"] = o
+	if w, err := b.Put(ctx, "index.html", "text/html", sum(data), int64(len(data)), strings.NewReader(data)); err != nil || !w {
+		t.Fatalf("written=%v err=%v", w, err)
+	}
+	if got := f.objects["/books/index.html"].cc; got != "public, max-age=300" {
+		t.Fatalf("after fixing: %q", got)
 	}
 }
