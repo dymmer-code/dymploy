@@ -54,6 +54,7 @@
     "cache": {
       "type": "object", "additionalProperties": false, "required": ["name", "path"],
       "properties": {
+        "key": {"type": "string", "maxLength": 256},
         "name": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{0,62}$"},
         "path": {"type": "string", "pattern": "^/[A-Za-z0-9._/-]{1,200}$", "description": "Absolute path inside the container, kept between builds."}
       }
@@ -97,10 +98,12 @@
       }
     },
     "deploy": {
-      "type": "object", "additionalProperties": false, "required": ["target"],
+      "type": "object", "additionalProperties": false, "oneOf": [{"required": ["target"], "not": {"required": ["targets"]}}, {"required": ["targets"], "not": {"required": ["target"]}}],
       "description": "On an ssh target, runs on it in order: the artifact is uploaded first and its path is in $DYMPLOY_ARTIFACT, and a failing step stops the deploy (optional steps_undo supplies recovery); steps are required. On an s3 target (the server decides the kind), the files of the artifact are put in its bucket under path; steps, check, after, steps_undo, finally and secrets are not allowed.",
       "properties": {
         "target": {"type": "string", "pattern": "^[a-z][a-z0-9-]{0,62}$", "description": "The NAME of a target configured on the dymploy server."},
+        "max_parallel": {"type": "integer", "minimum": 1, "maximum": 32},
+        "targets": {"type": "array", "minItems": 1, "maxItems": 32, "uniqueItems": true, "items": {"type": "string", "pattern": "^[a-z][a-z0-9-]{0,62}$"}},
         "timeout": {"$ref": "#/$defs/duration", "description": "For the whole deploy. Default 10m, at most 1h."},
         "secrets": {"type": "boolean", "default": false, "description": "Ask for the target's secrets. The server fetches them from the source it has configured for the target and uploads them next to the artifact (mode 0600); the path is in $DYMPLOY_SECRETS_FILE and the file is removed when the deploy ends. The definition never names the source."},
         "path": {"type": "string", "maxLength": 300, "pattern": "^[^/\\\\-][^\\\\]*$", "not": {"pattern": "(^|/)\\.\\.(/|$)"}, "description": "Only for s3 targets: the prefix, inside the bucket, where the files of the artifact are put (for example books/). Default: the root of the bucket."},

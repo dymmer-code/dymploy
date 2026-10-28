@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/dymmer-code/dymploy/internal/runner"
 	"io"
 	"net"
 	"net/http"
@@ -24,14 +25,16 @@ type Status struct {
 	StartedAt time.Time `json:"started_at"`
 	// State is running, draining (finishing the work in hand, taking no more, then stopping) or
 	// stopping (aborting what runs, then stopping). Queued and Running count the work.
-	State   string `json:"state,omitempty"`
-	Queued  int    `json:"queued"`
-	Running int    `json:"running"`
+	State   string         `json:"state,omitempty"`
+	Queued  int            `json:"queued"`
+	Running int            `json:"running"`
+	Secrets []SecretStatus `json:"secrets,omitempty"`
 }
 
 // Handlers are what the daemon offers through the socket. A nil Reload means the daemon cannot
 // reload its configuration.
 type Handlers struct {
+	Caches runner.CacheManager
 	Status func() Status
 	// Reload re-reads the configuration and applies what can change without a restart. The message
 	// says what happened; an error means nothing was changed.
@@ -83,6 +86,11 @@ func Serve(ctx context.Context, path string, h Handlers, ready func()) error {
 	}
 
 	mux := http.NewServeMux()
+	if h.Caches != nil {
+		ch := cacheHandler(h.Caches)
+		mux.Handle("/v1/cache", ch)
+		mux.Handle("/v1/cache/", ch)
+	}
 	mux.HandleFunc("GET /v1/status", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(h.Status())
@@ -236,4 +244,11 @@ func (c *Client) doBody(ctx context.Context, method, path string, body []byte, o
 		return 0, err
 	}
 	return resp.StatusCode, nil
+}
+
+type SecretStatus struct {
+	Target     string    `json:"target"`
+	State      string    `json:"state"`
+	DeployedAt time.Time `json:"deployed_at"`
+	CheckedAt  time.Time `json:"checked_at,omitzero"`
 }

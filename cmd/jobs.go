@@ -289,6 +289,20 @@ func newJobCmd() *cobra.Command {
 			if j.Error != "" {
 				fmt.Fprintf(out, "error    %s\n", j.Error)
 			}
+			if len(j.Details) > 0 {
+				var details struct {
+					Targets []struct {
+						Name     string `json:"name"`
+						State    string `json:"state"`
+						ExitCode int    `json:"exit_code"`
+					} `json:"targets"`
+				}
+				if json.Unmarshal(j.Details, &details) == nil {
+					for _, t := range details.Targets {
+						fmt.Fprintf(out, "target   %s: %s (exit %d)\n", t.Name, t.State, t.ExitCode)
+					}
+				}
+			}
 			if j.RetryOf != "" {
 				fmt.Fprintf(out, "retry of %s\n", j.RetryOf)
 			}

@@ -29,12 +29,15 @@ type Task struct {
 	// live stream, so it is how anyone later knows what happened. The runner must not keep it after
 	// Run returns.
 	Log Reporter
+	// Report persists opaque progress for the job API and event consumers.
+	Report func(json.RawMessage) error
 }
 
 // Result is how a task that ran ended.
 type Result struct {
 	// ExitCode of the work. Non-zero means the job failed; it is not an error of the runner.
 	ExitCode int
+	Details  json.RawMessage
 }
 
 // Runner executes tasks of the kinds it is registered for.
@@ -105,4 +108,9 @@ func (r *Registry) Kinds() []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// RetryPlanner can reuse verified work from a previous execution instead of rebuilding it.
+type RetryPlanner interface {
+	RetryInput(context.Context, Task, json.RawMessage) (json.RawMessage, error)
 }

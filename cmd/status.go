@@ -37,6 +37,11 @@ func newStatusCmd(_ string) *cobra.Command {
 			if st.State != "" {
 				fmt.Fprintf(out, "  state   %s (%s, %s)\n", st.State, plural(st.Running, "running job"), plural(st.Queued, "waiting job"))
 			}
+			for _, s := range st.Secrets {
+				if s.State != "current" {
+					fmt.Fprintf(out, "  secrets %s: %s (last delivered %s)\n", s.Target, s.State, s.DeployedAt.Format(time.RFC3339))
+				}
+			}
 			return nil
 		},
 	}

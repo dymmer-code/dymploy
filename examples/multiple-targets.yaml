@@ -1,0 +1,21 @@
+version: 1
+build:
+  image: {from: alpine:3}
+  steps:
+    - run: mkdir -p out && printf 'example\n' > out/app
+  cache:
+    - {name: deps, path: /cache/deps, key: linux-amd64-v1}
+artifact:
+  paths: [out/app]
+deploy:
+  targets: [web-a, web-b]
+  max_parallel: 1
+  steps:
+    - run: /opt/deploy/install-release
+  check: {run: /opt/deploy/check-health}
+  steps_undo:
+    - run: /opt/deploy/restore-previous-release
+    - run: /opt/deploy/check-health
+  finally:
+    steps:
+      - run: /opt/deploy/notify-result

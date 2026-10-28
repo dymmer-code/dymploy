@@ -135,6 +135,11 @@ func (d *Deployer) RunSecrets(parent context.Context, r SecretsRequest) (int, er
 			return fail(ExitCheck)
 		}
 	}
+	if d.SecretState != nil {
+		if err := d.SecretState.Record(t.Name, secrets); err != nil {
+			log.System("could not record the secrets fingerprint; status may be stale")
+		}
+	}
 	log.System("secrets changed on " + t.Name)
 	return 0, nil
 }

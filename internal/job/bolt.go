@@ -53,7 +53,13 @@ func (s *BoltStore) Put(_ context.Context, j Job) error {
 	if err != nil {
 		return err
 	}
-	return s.db.Update(func(tx *bolt.Tx) error { return tx.Bucket(jobsBucket).Put([]byte(j.ID), raw) })
+	return s.db.Update(func(tx *bolt.Tx) error {
+		b := tx.Bucket(jobsBucket)
+		if err := recordTransition(tx, b.Get([]byte(j.ID)), j); err != nil {
+			return err
+		}
+		return b.Put([]byte(j.ID), raw)
+	})
 }
 
 // Get implements Store.

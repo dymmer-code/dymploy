@@ -3,6 +3,7 @@ package docker
 import (
 	"errors"
 	"fmt"
+	"github.com/dymmer-code/dymploy/internal/runner"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -48,35 +49,77 @@ func scopeDir(scope string, branch, tag string) string {
 
 // acquire creates the caches of a build (or finds them), marks them used now and in use, and returns a
 // function that releases them.
-func (s *cacheStore) acquire(base string, names []string) (dirs []string, release func(), err error) {
+func (s *cacheStore) acquire(base string, names []string, keys []string) (dirs []string, release func(), err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.inUse == nil {
 		s.inUse = map[string]int{}
 	}
 	now := time.Now()
-	for _, name := range names {
-		host := filepath.Join(base, name)
+	var leases []string
+	cleanup := func() {
+		for _, p := range leases {
+			_ = os.Remove(p)
+			_ = os.Remove(filepath.Dir(p))
+		}
+		_ = os.Remove(filepath.Join(base, "@leases"))
+	}
+	success := false
+	defer func() {
+		if !success {
+			cleanup()
+		}
+	}()
+	markers := make([]string, len(names))
+	for i, name := range names {
+		p, err := pointer(base, name)
+		if err != nil {
+			return nil, nil, err
+		}
+		key := ""
+		if len(keys) > i {
+			key = keys[i]
+		}
+		if p.Key != key {
+			p, err = newGeneration(base, name, key)
+			if err != nil {
+				return nil, nil, err
+			}
+		}
+		markers[i] = marker(name, p.Generation)
+		host := generationPath(base, name, p.Generation)
 		if err := os.MkdirAll(host, 0o700); err != nil {
 			return nil, nil, fmt.Errorf("creating cache %s: %w", name, err)
 		}
-		if err := touchUse(base, name, now); err != nil {
+		if err := touchUse(base, markers[i], now); err != nil {
 			return nil, nil, fmt.Errorf("recording the use of cache %s: %w", name, err)
 		}
+		leaseDir := filepath.Join(base, "@leases", markers[i])
+		if err := os.MkdirAll(leaseDir, 0700); err != nil {
+			return nil, nil, err
+		}
+		lease, err := os.CreateTemp(leaseDir, "build-")
+		if err != nil {
+			return nil, nil, err
+		}
+		lease.Close()
+		leases = append(leases, lease.Name())
 		dirs = append(dirs, host)
 	}
 	for _, d := range dirs {
 		s.inUse[d]++
 	}
+	success = true
 	return dirs, func() {
 		s.mu.Lock()
 		defer s.mu.Unlock()
 		now := time.Now()
+		cleanup()
 		for i, d := range dirs {
 			if s.inUse[d]--; s.inUse[d] <= 0 {
 				delete(s.inUse, d)
 			}
-			_ = touchUse(base, names[i], now) // a long build counts as used until it ends
+			_ = touchUse(base, markers[i], now) // a long build counts as used until it ends
 		}
 	}, nil
 }
@@ -107,32 +150,29 @@ type CacheReport struct {
 // that a running build could notice: both the decision and the removal happen while no build can start
 // using a cache.
 func (r *Runner) CleanCaches(olderThan time.Duration, maxBytes int64) (CacheReport, error) {
+	return r.cleanCaches(olderThan, maxBytes, runner.CacheRequest{})
+}
+func (r *Runner) cleanCaches(olderThan time.Duration, maxBytes int64, q runner.CacheRequest) (CacheReport, error) {
 	var rep CacheReport
 	var errs []error
 	root := r.cfg.CacheDir
-	var uses []string // the @use directories found
-	err := filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
-		if err != nil {
-			if errors.Is(err, fs.ErrNotExist) {
-				return nil
-			}
-			return err
-		}
-		if d.IsDir() && d.Name() == useDir {
-			uses = append(uses, p)
-			return filepath.SkipDir
-		}
-		if d.IsDir() && p != root && strings.HasPrefix(d.Name(), ".") {
-			return filepath.SkipDir
-		}
-		return nil
-	})
+	uses, err := cacheUses(root)
 	if err != nil {
 		return rep, err
 	}
 	cutoff := time.Now().Add(-olderThan)
 	for _, u := range uses {
 		base := filepath.Dir(u)
+		rel, _ := filepath.Rel(root, base)
+		parts := strings.Split(filepath.ToSlash(rel), "/")
+		repo := strings.Join(parts[:3], "/")
+		scope := "repository"
+		if len(parts) > 3 {
+			scope = parts[3]
+		}
+		if q.Repository != "" && repo != q.Repository || q.Scope != "" && scope != q.Scope {
+			continue
+		}
 		entries, err := os.ReadDir(u)
 		if err != nil {
 			errs = append(errs, err)
@@ -143,10 +183,29 @@ func (r *Runner) CleanCaches(olderThan time.Duration, maxBytes int64) (CacheRepo
 			if err != nil {
 				continue
 			}
-			cache := filepath.Join(base, e.Name())
+			name, gen := splitMarker(e.Name())
+			if q.Name != "" && name != q.Name {
+				continue
+			}
+			cache := generationPath(base, name, gen)
 			r.caches.mu.Lock()
+			p, pe := pointer(base, name)
+			if pe != nil {
+				r.caches.mu.Unlock()
+				errs = append(errs, pe)
+				continue
+			}
 			switch {
-			case r.caches.inUse[cache] > 0:
+			case p.Generation != gen && r.caches.inUse[cache] == 0 && !cacheLeased(base, e.Name()):
+				size := sizeAbove(cache, 1<<62)
+				if err := os.RemoveAll(cache); err != nil {
+					errs = append(errs, err)
+				} else {
+					rep.Freed += size
+					_ = os.Remove(filepath.Join(u, e.Name()))
+				}
+
+			case r.caches.inUse[cache] > 0 || cacheLeased(base, e.Name()):
 				// a build is using it
 			case !exists(cache):
 				_ = os.Remove(filepath.Join(u, e.Name()))

@@ -644,3 +644,98 @@ func TestAJobThatOnlyChecksTheCodePacksAndDeploysNothing(t *testing.T) {
 		t.Fatalf("%+v %v", res, err)
 	}
 }
+
+func TestFailedDeploymentRetryReusesVerifiedArtifact(t *testing.T) {
+	r := newDeployRig(t, withDeploy, true)
+	r.remote.Handle = func(s string) (int, string, bool) {
+		if s == "probe" {
+			return 1, "", false
+		}
+		return 0, "", false
+	}
+	result, err := r.do(context.Background())
+	if err != nil || result.ExitCode != deploy.ExitCheck {
+		t.Fatalf("%+v %v", result, err)
+	}
+	input, _ := json.Marshal(provider.Event{Provider: "github", Owner: "acme", Repo: "app", Commit: commit, Branch: "main"})
+	task := runner.Task{JobID: "job-1", Name: "github/acme/app", Input: input}
+	next, err := r.run.RetryInput(context.Background(), task, result.Details)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.eng.PingErr = errors.New("engine offline: retry must not build")
+	r.remote.Handle = nil
+	rep := runner.NewLineReporter(func(runner.Stream, string) {})
+	defer rep.Close()
+	task.JobID = "job-2"
+	task.Input = next
+	task.Log = rep
+	res, err := r.run.Run(context.Background(), task)
+	if err != nil || res.ExitCode != 0 {
+		t.Fatalf("%+v %v", res, err)
+	}
+	fresh, _, err := artifact.ReadRecord(filepath.Join(r.arts, "job-2"))
+	if err != nil || fresh.Job != "job-2" || time.Since(fresh.CreatedAt) > time.Minute {
+		t.Fatalf("retry did not get independent retention: %+v %v", fresh, err)
+	}
+	if len(r.eng.Created) != 1 || r.released != 1 {
+		t.Fatal("retry rebuilt or cloned")
+	}
+	// Integrity is checked even for retry planning.
+	var out deploy.Outcome
+	json.Unmarshal(result.Details, &out)
+	rec, file, err := artifact.ReadRecord(filepath.Join(r.arts, out.ArtifactJob))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = rec
+	os.WriteFile(file, []byte("corrupt"), 0600)
+	if _, err := r.run.RetryInput(context.Background(), task, result.Details); err == nil {
+		t.Fatal("accepted corrupt artifact")
+	}
+}
+
+func TestRetryRefusesChangedIdentityOrTarget(t *testing.T) {
+	r := newDeployRig(t, withDeploy, true)
+	r.remote.Handle = func(s string) (int, string, bool) {
+		if s == "probe" {
+			return 1, "", false
+		}
+		return 0, "", false
+	}
+	res, err := r.do(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var details deploy.Outcome
+	json.Unmarshal(res.Details, &details)
+	rep := runner.NewLineReporter(func(runner.Stream, string) {})
+	defer rep.Close()
+	base := map[string]any{"provider": "github", "owner": "acme", "repo": "app", "commit": commit, "branch": "main"}
+	for _, mode := range []string{"identity", "target", "path", "duplicate", "manifest"} {
+		t.Run(mode, func(t *testing.T) {
+			in := map[string]any{}
+			for k, v := range base {
+				in[k] = v
+			}
+			req := map[string]any{"artifact_job": details.ArtifactJob, "targets": []string{"production"}}
+			switch mode {
+			case "identity":
+				in["owner"] = "other"
+			case "target":
+				req["targets"] = []string{"unauthorized"}
+			case "path":
+				req["artifact_job"] = "../outside"
+			case "duplicate":
+				req["targets"] = []string{"production", "production"}
+			case "manifest":
+				os.WriteFile(filepath.Join(r.arts, details.ArtifactJob, "deploy-plan.yaml"), []byte("broken"), 0600)
+			}
+			in["deploy_retry"] = req
+			raw, _ := json.Marshal(in)
+			if _, err := r.run.Run(context.Background(), runner.Task{JobID: "retry", Input: raw, Log: rep}); err == nil {
+				t.Fatal("unsafe retry accepted")
+			}
+		})
+	}
+}

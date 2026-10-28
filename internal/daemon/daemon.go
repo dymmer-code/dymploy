@@ -17,6 +17,7 @@ import (
 
 	"github.com/dymmer-code/dymploy/internal/config"
 	"github.com/dymmer-code/dymploy/internal/control"
+	"github.com/dymmer-code/dymploy/internal/runner"
 )
 
 // Timeouts of the public listener. A client that is slow to send its request must not be able to hold
@@ -66,14 +67,16 @@ func (m Mode) String() string {
 
 // Daemon is one running instance.
 type Daemon struct {
-	cfg       *config.Config
-	version   string
-	startedAt time.Time
-	handlers  []route
-	reload    func() (string, error)
-	jobs      control.Jobs
-	stop      func(graceful bool, reason string) (string, error)
-	stats     func() (queued, running int)
+	caches       runner.CacheManager
+	cfg          *config.Config
+	version      string
+	startedAt    time.Time
+	handlers     []route
+	reload       func() (string, error)
+	jobs         control.Jobs
+	stop         func(graceful bool, reason string) (string, error)
+	stats        func() (queued, running int)
+	secretStatus func() []control.SecretStatus
 
 	mode    atomic.Int32
 	closing chan struct{}
@@ -199,7 +202,7 @@ func (d *Daemon) Run(ctx context.Context, ready func(net.Addr)) error {
 	ctlReady := make(chan struct{})
 	ctlErr := make(chan error, 1)
 	go func() {
-		ctlErr <- control.Serve(ctx, d.cfg.ControlSocket, control.Handlers{Status: d.status, Reload: d.reload, Jobs: d.jobs, Stop: d.stop, Closing: d.closing}, func() { close(ctlReady) })
+		ctlErr <- control.Serve(ctx, d.cfg.ControlSocket, control.Handlers{Caches: d.caches, Status: d.status, Reload: d.reload, Jobs: d.jobs, Stop: d.stop, Closing: d.closing}, func() { close(ctlReady) })
 	}()
 
 	select {
@@ -244,5 +247,16 @@ func (d *Daemon) status() control.Status {
 	if d.stats != nil {
 		st.Queued, st.Running = d.stats()
 	}
+	if d.secretStatus != nil {
+		st.Secrets = d.secretStatus()
+	}
 	return st
 }
+
+func (d *Daemon) WithSecretStatus(f func() []control.SecretStatus) *Daemon {
+	d.secretStatus = f
+	return d
+}
+func (d *Daemon) Status() control.Status { return d.status() }
+
+func (d *Daemon) WithCaches(m runner.CacheManager) *Daemon { d.caches = m; return d }

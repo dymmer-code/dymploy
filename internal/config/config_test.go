@@ -248,3 +248,15 @@ func TestAppSettingsValidation(t *testing.T) {
 		})
 	}
 }
+
+func TestEventSinkConfiguration(t *testing.T) {
+	valid := "events:\n  sinks:\n    - name: audit\n      url: https://example.com/events\n      secret_file: /private/key\n      repositories: [github/acme/app]\n      types: [queued, started, finished, aborted, interrupted]\n"
+	if _, err := Load(write(t, valid)); err != nil {
+		t.Fatal(err)
+	}
+	for _, bad := range []string{strings.ReplaceAll(valid, "https:", "http:"), strings.ReplaceAll(valid, "https://example.com", "https://user:pass@example.com"), strings.ReplaceAll(valid, "/private/key", "relative"), strings.ReplaceAll(valid, "queued, started", "no-such-event, started"), strings.ReplaceAll(valid, "name: audit", "name: ''")} {
+		if _, err := Load(write(t, bad)); err == nil {
+			t.Fatal("accepted invalid sink", bad)
+		}
+	}
+}

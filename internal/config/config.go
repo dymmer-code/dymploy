@@ -19,6 +19,7 @@ import (
 // Config is the daemon configuration. Everything that is specific to an installation
 // (listen address, paths) lives here, never in the code.
 type Config struct {
+	Events EventsConfig `yaml:"events"`
 	// Listen is the HTTP address for webhooks and the API.
 	Listen string `yaml:"listen"`
 	// ControlSocket is the Unix socket the CLI uses to talk to the running daemon.
@@ -265,6 +266,31 @@ func Load(path string) (*Config, error) {
 
 // Validate checks the values that would otherwise fail later and far from the cause.
 func (c *Config) Validate() error {
+	seenSinks := map[string]bool{}
+	if len(c.Events.Sinks) > 32 {
+		return fmt.Errorf("events.sinks: at most 32 sinks")
+	}
+	for _, sink := range c.Events.Sinks {
+		u, err := url.Parse(sink.URL)
+		if err != nil || u.Scheme != "https" || u.Hostname() == "" || u.User != nil || u.Fragment != "" {
+			return fmt.Errorf("events.sinks: URL must be HTTPS without credentials or fragment")
+		}
+		if sink.Name == "" || len(sink.Name) > 64 || seenSinks[sink.Name] {
+			return fmt.Errorf("events.sinks: names must be unique, nonempty and at most 64 bytes")
+		}
+		seenSinks[sink.Name] = true
+		if !filepath.IsAbs(sink.SecretFile) {
+			return fmt.Errorf("events.sinks: secret_file must be absolute")
+		}
+		for _, typ := range sink.Types {
+			switch typ {
+			case "queued", "started", "finished", "aborted", "interrupted":
+			default:
+				return fmt.Errorf("events.sinks: unknown event type %q", typ)
+			}
+		}
+	}
+
 	if _, _, err := net.SplitHostPort(c.Listen); err != nil {
 		return fmt.Errorf("listen %q must be host:port: %w", c.Listen, err)
 	}
@@ -503,4 +529,15 @@ func (c *Config) TrustedPrefixes() []netip.Prefix {
 		}
 	}
 	return out
+}
+
+type EventsConfig struct {
+	Sinks []EventSink `yaml:"sinks"`
+}
+type EventSink struct {
+	Name         string   `yaml:"name"`
+	URL          string   `yaml:"url"`
+	SecretFile   string   `yaml:"secret_file"`
+	Repositories []string `yaml:"repositories"`
+	Types        []string `yaml:"types"`
 }

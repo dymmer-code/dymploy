@@ -149,7 +149,8 @@ type Deployer struct {
 	Store   Store
 	Targets *Targets
 	// Secrets fetches the secrets of definitions that ask for them (deploy.secrets).
-	Secrets SecretFetcher
+	Secrets     SecretFetcher
+	SecretState *SecretState
 }
 
 // AuthorizeDeploy is Authorize for a whole definition: besides the target, the secrets it asks for must be
@@ -205,13 +206,14 @@ func refName(ev provider.Event) string {
 
 // Request is one deployment.
 type Request struct {
-	Target Target
-	Deploy *manifest.Deploy
-	Event  provider.Event
-	JobID  string
-	Record artifact.Record
-	File   string // local path of the archive
-	Log    runner.Reporter
+	SecretsOnly bool // RunMany uses the separate secrets-only lifecycle when true.
+	Target      Target
+	Deploy      *manifest.Deploy
+	Event       provider.Event
+	JobID       string
+	Record      artifact.Record
+	File        string // local path of the archive
+	Log         runner.Reporter
 }
 
 var unsafe = regexp.MustCompile(`[^A-Za-z0-9_.-]+`)
@@ -289,6 +291,17 @@ func (d *Deployer) Run(parent context.Context, r Request) (result int, runErr er
 	phase := "upload"
 	defer func() {
 		d.finishDeployment(parent, conn, r, env, phase, &result, &runErr)
+		if result == 0 && runErr == nil && d.SecretState != nil {
+			var err error
+			if r.Deploy.Secrets {
+				err = d.SecretState.Record(t.Name, secrets)
+			} else {
+				err = d.SecretState.Forget(t.Name)
+			}
+			if err != nil {
+				log.System("could not record the secrets fingerprint; status may be stale")
+			}
+		}
 	}()
 	if err := d.upload(ctx, conn, r, remote); err != nil {
 		return ended(err)

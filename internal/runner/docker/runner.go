@@ -8,6 +8,7 @@ package docker
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -87,6 +88,11 @@ func safe(s string) string { return strings.Trim(unsafeChars.ReplaceAllString(s,
 
 // Run implements runner.Runner.
 func (r *Runner) Run(ctx context.Context, t runner.Task) (runner.Result, error) {
+	if retry, err := parseRetry(t.Input); err != nil {
+		return runner.Result{}, err
+	} else if retry != nil {
+		return r.retryDeploy(ctx, t, *retry)
+	}
 	if err := r.cfg.Engine.Ping(ctx); err != nil {
 		return runner.Result{}, err
 	}
@@ -111,9 +117,9 @@ func (r *Runner) Run(ctx context.Context, t runner.Task) (runner.Result, error) 
 	}
 	log.System("manifest: " + m.Summary())
 
-	var target deploy.Target
+	var targets []deploy.Target
 	if m.HasDeploy() && r.cfg.NoDeploy {
-		log.System("this definition deploys to " + m.Deploy.Target + ": not delivered in this run")
+		log.System("this definition deploys to " + strings.Join(m.Deploy.TargetNames(), ",") + ": not delivered in this run")
 	} else if m.HasDeploy() {
 		// Checked before building: a definition that asks for a target it cannot use must fail at once.
 		if r.cfg.Deployer == nil {
@@ -121,7 +127,7 @@ func (r *Runner) Run(ctx context.Context, t runner.Task) (runner.Result, error) 
 			return runner.Result{ExitCode: deploy.ExitTargetDenied}, nil
 		}
 		var err error
-		if target, err = r.cfg.Deployer.AuthorizeDeploy(m.Deploy, ev); err != nil {
+		if targets, err = r.cfg.Deployer.AuthorizeMany(m.Deploy, ev); err != nil {
 			log.Stderr().Write([]byte(err.Error() + "\n"))
 			log.System("nothing was built")
 			return runner.Result{ExitCode: deploy.ExitTargetDenied}, nil
@@ -139,11 +145,24 @@ func (r *Runner) Run(ctx context.Context, t runner.Task) (runner.Result, error) 
 	if b.id == "" {
 		return runner.Result{}, errors.New("the task has no usable job id")
 	}
+	var plan []byte
+	if m.HasDeploy() && !r.cfg.NoDeploy {
+		plan, err = os.ReadFile(filepath.Join(dir, "dymploy.yaml"))
+		if os.IsNotExist(err) {
+			plan, err = os.ReadFile(filepath.Join(dir, "dymploy.yml"))
+		}
+		if err != nil {
+			return runner.Result{}, err
+		}
+	}
 	res, err := b.run(ctx)
 	if err != nil || res.ExitCode != 0 || !m.HasDeploy() || r.cfg.NoDeploy {
 		return res, err
 	}
-	return b.deploy(ctx, target)
+	if err := os.WriteFile(filepath.Join(r.cfg.ArtifactsDir, b.id, "deploy-plan.yaml"), plan, 0600); err != nil {
+		return runner.Result{}, err
+	}
+	return b.deploy(ctx, targets)
 }
 
 // readManifest returns the manifest of the working copy, or a message for the log.
@@ -274,15 +293,24 @@ func (b *build) run(ctx context.Context) (runner.Result, error) {
 
 // deploy delivers the artifact just built. It reads it back through its record, so what is deployed
 // is verified to be exactly what was packed.
-func (b *build) deploy(ctx context.Context, target deploy.Target) (runner.Result, error) {
+func (b *build) deploy(ctx context.Context, targets []deploy.Target) (runner.Result, error) {
 	rec, file, err := artifact.ReadRecord(filepath.Join(b.r.cfg.ArtifactsDir, b.id))
 	if err != nil {
 		return runner.Result{}, err
 	}
-	code, err := b.r.cfg.Deployer.Run(ctx, deploy.Request{
-		Target: target, Deploy: b.m.Deploy, Event: b.ev, JobID: b.t.JobID, Record: rec, File: file, Log: b.t.Log,
+	out, err := b.r.cfg.Deployer.RunMany(ctx, deploy.Request{
+		Deploy: b.m.Deploy, Event: b.ev, JobID: b.t.JobID, Record: rec, File: file, Log: b.t.Log,
+	}, targets, func(out deploy.Outcome) error {
+		out.ArtifactJob = b.id
+		data, _ := json.Marshal(out)
+		if b.t.Report != nil {
+			return b.t.Report(data)
+		}
+		return nil
 	})
-	return runner.Result{ExitCode: code}, err
+	out.ArtifactJob = b.id
+	data, _ := json.Marshal(out)
+	return runner.Result{ExitCode: out.ExitCode, Details: data}, err
 }
 
 // buildImage builds build.image.dockerfile and returns the tag of the image, which belongs to this job.
@@ -327,10 +355,12 @@ func (b *build) cacheMounts() ([]cacheMount, func(), error) {
 		base = filepath.Join(base, sc)
 	}
 	names := make([]string, len(b.m.Build.Cache))
+	keys := make([]string, len(names))
 	for i, c := range b.m.Build.Cache {
 		names[i] = c.Name
+		keys[i] = c.Key
 	}
-	dirs, release, err := b.r.caches.acquire(base, names)
+	dirs, release, err := b.r.caches.acquire(base, names, keys)
 	if err != nil {
 		return nil, nil, err
 	}

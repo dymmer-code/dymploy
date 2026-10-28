@@ -60,6 +60,7 @@ type Step struct {
 
 // Cache is a directory inside the build containers kept between builds of the same repository.
 type Cache struct {
+	Key  string `yaml:"key"`
 	Name string `yaml:"name"`
 	Path string `yaml:"path"`
 }
@@ -83,8 +84,10 @@ type Artifact struct {
 
 // Deploy delivers the artifact to a target and runs the commands that install it.
 type Deploy struct {
-	Target  string   `yaml:"target"`
-	Timeout Duration `yaml:"timeout"`
+	Target      string   `yaml:"target"`
+	Targets     []string `yaml:"targets"`
+	MaxParallel *int     `yaml:"max_parallel"`
+	Timeout     Duration `yaml:"timeout"`
 	// Secrets asks for the target's secrets: the server fetches them from the source configured for the
 	// target and puts them on it for the steps (path in $DYMPLOY_SECRETS_FILE). Which source is the
 	// server's decision; the definition cannot name one.
@@ -154,7 +157,7 @@ func (m *Manifest) Summary() string {
 		parts = append(parts, "no artifact")
 	}
 	if m.Deploy != nil {
-		parts = append(parts, "deploy: "+m.Deploy.Target)
+		parts = append(parts, "deploy: "+strings.Join(m.Deploy.TargetNames(), ", "))
 	}
 	return strings.Join(parts, ", ")
 }
@@ -343,4 +346,12 @@ func (m *Manifest) applyDefaults() {
 			}
 		}
 	}
+}
+
+// TargetNames preserves the order declared by the manifest.
+func (d *Deploy) TargetNames() []string {
+	if d.Target != "" {
+		return []string{d.Target}
+	}
+	return append([]string(nil), d.Targets...)
 }

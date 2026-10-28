@@ -461,7 +461,16 @@ func (m *Manager) Retry(ctx context.Context, id job.ID) (job.Job, error) {
 	if !j.State.Final() {
 		return job.Job{}, fmt.Errorf("%w: job %s is %s", ErrNotFinished, id, j.State)
 	}
-	return m.Submit(ctx, Request{Name: j.Name, Kind: j.Kind, Params: j.Params, Input: j.Input, RetryOf: j.ID})
+	input := j.Input
+	if rn, e := m.d.Runners.Get(j.Kind); e == nil {
+		if planner, ok := rn.(runner.RetryPlanner); ok {
+			input, err = planner.RetryInput(ctx, runner.Task{JobID: string(j.ID), Name: j.Name, Kind: j.Kind, Params: j.Params, Input: j.Input}, j.Details)
+			if err != nil {
+				return job.Job{}, err
+			}
+		}
+	}
+	return m.Submit(ctx, Request{Name: j.Name, Kind: j.Kind, Params: j.Params, Input: input, RetryOf: j.ID})
 }
 
 // Get returns a job.
@@ -598,6 +607,9 @@ func (m *Manager) execute(ctx context.Context, r *running) {
 	final := r.job // it carries the stop request, if there was one
 	m.mu.Unlock()
 	final.FinishedAt = m.d.Now()
+	if len(res.Details) > 0 {
+		final.Details = res.Details
+	}
 	var stop *StopCause
 	errors.As(context.Cause(ctx), &stop)
 	switch {
@@ -654,7 +666,16 @@ func (m *Manager) run(ctx context.Context, j job.Job, rep runner.Reporter) (res 
 	if err != nil {
 		return runner.Result{}, err
 	}
-	return rn.Run(ctx, runner.Task{JobID: string(j.ID), Name: j.Name, Kind: j.Kind, Params: j.Params, Input: j.Input, Log: rep})
+	return rn.Run(ctx, runner.Task{JobID: string(j.ID), Name: j.Name, Kind: j.Kind, Params: j.Params, Input: j.Input, Log: rep, Report: func(details json.RawMessage) error {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		r := m.running[j.ID]
+		if r == nil || r.finished {
+			return errors.New("job is no longer running")
+		}
+		r.job.Details = append(json.RawMessage(nil), details...)
+		return m.d.Store.Put(context.Background(), r.job)
+	}})
 }
 
 func finishLine(j job.Job) string {

@@ -5,6 +5,7 @@ package secretsjob
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 
 	"github.com/dymmer-code/dymploy/internal/deploy"
@@ -59,17 +60,29 @@ func (r *Runner) Run(ctx context.Context, t runner.Task) (runner.Result, error) 
 		log.Stderr().Write([]byte("this definition has no deploy section: there are no secrets to change\n"))
 		return runner.Result{ExitCode: deploy.ExitNoSecretsSteps}, nil
 	}
-	target, err := r.cfg.Deployer.AuthorizeSecrets(m.Deploy, ev)
-	if err != nil {
-		log.Stderr().Write([]byte(err.Error() + "\n"))
-		log.System("nothing was changed")
-		if errors.Is(err, deploy.ErrNoSecretsSteps) {
-			return runner.Result{ExitCode: deploy.ExitNoSecretsSteps}, nil
+	var targets []deploy.Target
+	for _, name := range m.Deploy.TargetNames() {
+		one := *m.Deploy
+		one.Target = name
+		one.Targets = nil
+		target, err := r.cfg.Deployer.AuthorizeSecrets(&one, ev)
+		if err != nil {
+			log.Stderr().Write([]byte(err.Error() + "\n"))
+			log.System("nothing was changed")
+			if errors.Is(err, deploy.ErrNoSecretsSteps) {
+				return runner.Result{ExitCode: deploy.ExitNoSecretsSteps}, nil
+			}
+			return runner.Result{ExitCode: deploy.ExitTargetDenied}, nil
 		}
-		return runner.Result{ExitCode: deploy.ExitTargetDenied}, nil
+		targets = append(targets, target)
 	}
-	code, err := r.cfg.Deployer.RunSecrets(ctx, deploy.SecretsRequest{
-		Target: target, Deploy: m.Deploy, Event: ev, JobID: t.JobID, Log: log,
+	out, err := r.cfg.Deployer.RunMany(ctx, deploy.Request{SecretsOnly: true, Deploy: m.Deploy, Event: ev, JobID: t.JobID, Log: log}, targets, func(out deploy.Outcome) error {
+		raw, _ := json.Marshal(out)
+		if t.Report != nil {
+			return t.Report(raw)
+		}
+		return nil
 	})
-	return runner.Result{ExitCode: code}, err
+	raw, _ := json.Marshal(out)
+	return runner.Result{ExitCode: out.ExitCode, Details: raw}, err
 }

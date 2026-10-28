@@ -70,6 +70,9 @@ func (v *validator) build(b *Build) {
 	v.duration("build.limits.timeout", b.Limits.Timeout, time.Second, 4*time.Hour)
 	seen := map[string]bool{}
 	for i, c := range b.Cache {
+		if len(c.Key) > 256 || strings.ContainsAny(c.Key, "\x00\n") {
+			v.add("build.cache.key", "at most 256 bytes, without NUL or newline")
+		}
 		p := fmt.Sprintf("build.cache[%d]", i)
 		if !cacheNameRE.MatchString(c.Name) {
 			v.add(p+".name", "%q is not a valid name (lowercase letters, digits, . _ -)", c.Name)
@@ -168,8 +171,24 @@ func (v *validator) artifact(a *Artifact) {
 }
 
 func (v *validator) deploy(d *Deploy) {
-	if !targetRE.MatchString(d.Target) {
-		v.add("deploy.target", "%q is not a target name: use the name of a target configured on the dymploy server (lowercase letters, digits and -), never a host or a user", d.Target)
+	if (d.Target == "") == (len(d.Targets) == 0) {
+		v.add("deploy.target", "use exactly one of target or targets")
+	}
+	if len(d.Targets) > 32 {
+		v.add("deploy.targets", "at most 32 targets")
+	}
+	seen := map[string]bool{}
+	for _, n := range d.TargetNames() {
+		if !targetRE.MatchString(n) {
+			v.add("deploy.target", "%q is not a target name: use a configured name, never a host or user", n)
+		}
+		if seen[n] {
+			v.add("deploy.targets", "duplicate target %q", n)
+		}
+		seen[n] = true
+	}
+	if d.MaxParallel != nil && (*d.MaxParallel < 1 || *d.MaxParallel > 32) {
+		v.add("deploy.max_parallel", "must be between 1 and 32")
 	}
 	v.duration("deploy.timeout", d.Timeout, time.Second, time.Hour)
 	// Whether steps are required depends on the kind of the target, which only the server knows: an ssh target

@@ -390,3 +390,69 @@ The architecture rules (which packages may import a provider, the container engi
 ## License
 
 MIT
+
+## Durable run events
+
+The next release adds optional server-configured event receivers. Each receiver needs a unique stable
+name and a private signing-key file (at least 32 bytes). Configuration changes require a daemon restart.
+
+```yaml
+events:
+  sinks:
+    - name: deployment-history
+      url: https://control.example.com/hooks/deployments
+      secret_file: /etc/dymploy/events/history.key
+      repositories: [github/acme/app]  # exact run names; omitted = all
+      types: [queued, started, finished, aborted, interrupted]  # omitted = all
+```
+
+Job state changes and their outbox records commit in the **same database transaction**. Receivers are
+served independently; a slow/offline receiver never waits inside a deployment. Pending records and
+acknowledgements survive daemon restarts. Delivery is ordered per receiver (and therefore per run), with
+an HTTP timeout of 10 seconds and exponential retry delays up to one minute. Only 2xx acknowledges an
+event; redirects are not followed. Fully acknowledged records are pruned. A failed receiver retains its
+backlog, so monitor available disk space. Removing a sink retires its backlog; a new sink starts from the
+remaining retained events, not from all historical jobs. No sinks means no event recording overhead.
+
+The JSON body carries event ID/type, job identity and number, state, reference/commit, timestamps,
+duration, exit code and per-target outcomes. It excludes command output, raw errors, stop reasons, runner
+parameters, secrets and host addresses. Fetch authorized job logs separately when needed.
+
+Headers:
+
+- `X-Dymploy-Event-ID`: stable `<job-id>:<state>`; **deduplicate this ID**. Delivery is at least once:
+  a crash after the receiver accepts but before the acknowledgement is stored can replay an event.
+- `X-Dymploy-Timestamp`: Unix seconds for this delivery attempt.
+- `X-Dymploy-Signature`: `sha256=<hex HMAC-SHA256(key, timestamp + "." + exact-body-bytes)>`.
+
+Receivers should verify the signature with a constant-time comparison, enforce a timestamp tolerance
+(e.g. five minutes), and deduplicate before applying side effects. Keep clocks synchronized. These events
+complement deployment `finally`: they also cover build failures and jobs interrupted by a daemon crash.
+
+## Detecting changed secrets
+
+After a successful deployment requesting secrets, or a successful `dymploy secrets`, the daemon stores a
+per-target **HMAC-SHA-256 fingerprint** and delivery time under `data_dir/state/secrets`. The random private
+key is separate from the fingerprint file; neither raw secrets nor fingerprints are exposed through the API.
+Preserve this directory when moving the daemon. It is created automatically; existing installations gain
+baselines on their next successful delivery, not by assuming that today's source matches a running app.
+
+`dymploy status` reports `changed`, `unavailable` or `checking` for affected destinations. `status --json`
+and authenticated `GET /api/v1/status` include the structured comparison and timestamps. Comparisons are
+requested asynchronously by status and cached for five minutes, so a slow/broken source does not block
+status. A failed source produces `unavailable`, never a false `current`. After changing secrets, run
+`dymploy secrets <repository> --ref <deployed-ref>` to apply them; a successful run resets the baseline.
+
+Only destinations with a recorded successful secrets delivery are compared. A successful normal deployment
+that no longer requests secrets removes that destination's baseline. Removed targets or sources do not
+produce warnings. No secret is applied merely by asking for status.
+
+## Deployment and cache administration in the next release
+
+- [Multiple destinations and artifact-only retries](docs/dymploy-yaml.md#multiple-deployment-destinations).
+- [Optional recovery and finalization](docs/dymploy-yaml.md#recovery-and-finalization).
+- [Cache inventory, generations and invalidation](docs/dymploy-yaml.md#cache-compatibility-and-invalidation).
+
+All new manifest fields are optional version-1 extensions. Upgrade the executor before using them;
+older executors correctly reject keys they do not understand. No release or production configuration is
+changed by adding these capabilities to the source tree.

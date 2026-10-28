@@ -23,6 +23,7 @@ import (
 	"github.com/dymmer-code/dymploy/internal/deploy/s3store"
 	"github.com/dymmer-code/dymploy/internal/deploy/secretcmd"
 	"github.com/dymmer-code/dymploy/internal/deploy/sshremote"
+	"github.com/dymmer-code/dymploy/internal/events"
 	"github.com/dymmer-code/dymploy/internal/intake"
 	"github.com/dymmer-code/dymploy/internal/job"
 	"github.com/dymmer-code/dymploy/internal/provider"
@@ -35,6 +36,7 @@ import (
 	"github.com/dymmer-code/dymploy/internal/runner/secretsjob"
 	"github.com/dymmer-code/dymploy/internal/secret"
 	"github.com/dymmer-code/dymploy/internal/webhook"
+	"sync"
 )
 
 // extraRunners lets tests register runners of their own (for example one that never ends).
@@ -65,6 +67,11 @@ func newServeCmd(version string) *cobra.Command {
 				return err
 			}
 			deployer := &deploy.Deployer{Remote: remote, Store: store, Targets: targets, Secrets: secretcmd.New()}
+			secretState, err := deploy.NewSecretState(filepath.Join(cfg.DataDir, "state", "secrets"), targets, deployer.Secrets)
+			if err != nil {
+				return fmt.Errorf("opening secrets state directory: %w", err)
+			}
+			deployer.SecretState = secretState
 			mgr, repos, dockerRunner, closeState, err := buildQueue(cfg, log, providers, deployer)
 			if err != nil {
 				return err
@@ -93,7 +100,16 @@ func newServeCmd(version string) *cobra.Command {
 			jobs := queueJobs{m: mgr, log: log, providers: providers, hooks: hooks, enq: enq, secretsEnq: secretsEnq}
 			rl := &reloader{path: configPath, cur: cfg, hooks: hooks, remote: remote, store: store, targets: targets, mgr: mgr, log: log}
 			reloadOnSIGHUP(ctx, rl)
-			d := daemon.New(cfg, version).OnReload(rl.Reload).WithJobs(jobs)
+			d := daemon.New(cfg, version).OnReload(rl.Reload).WithJobs(jobs).WithSecretStatus(func() []control.SecretStatus {
+				var out []control.SecretStatus
+				for _, s := range secretState.Snapshot() {
+					out = append(out, control.SecretStatus{Target: s.Target, State: s.State, DeployedAt: s.DeployedAt, CheckedAt: s.CheckedAt})
+				}
+				return out
+			})
+			if dockerRunner != nil {
+				d.WithCaches(dockerRunner)
+			}
 			if err := mountAPI(d, cfg, jobs, log); err != nil {
 				return err
 			}
@@ -173,6 +189,21 @@ func buildQueue(cfg *config.Config, log *slog.Logger, providers map[string]provi
 		store.Close()
 		return nil, nil, nil, nil, err
 	}
+	var sinks []events.Sink
+	var sinkNames []string
+	for _, s := range cfg.Events.Sinks {
+		key, err := secret.ReadFile(s.SecretFile)
+		if err != nil || len(key) < 32 {
+			store.Close()
+			return nil, nil, nil, nil, fmt.Errorf("event sink %s needs a private signing key of at least 32 bytes", s.Name)
+		}
+		sinks = append(sinks, events.Sink{Name: s.Name, URL: s.URL, Key: []byte(key), Repositories: s.Repositories, Types: s.Types})
+		sinkNames = append(sinkNames, s.Name)
+	}
+	if err := store.EventSinks(sinkNames); err != nil {
+		store.Close()
+		return nil, nil, nil, nil, err
+	}
 	var observer func(queue.Event)
 	if rep := newStatusReporter(cfg, providers, log); rep != nil {
 		observer = rep.Observe
@@ -186,7 +217,13 @@ func buildQueue(cfg *config.Config, log *slog.Logger, providers map[string]provi
 		store.Close()
 		return nil, nil, nil, nil, err
 	}
-	return mgr, repos, dockerRunner, func() { store.Close() }, nil
+	eventCtx, stopEvents := context.WithCancel(context.Background())
+	var eventWG sync.WaitGroup
+	for _, sink := range sinks {
+		eventWG.Add(1)
+		go func() { defer eventWG.Done(); events.Deliver(eventCtx, store, sink, time.Second, log) }()
+	}
+	return mgr, repos, dockerRunner, func() { stopEvents(); eventWG.Wait(); store.Close() }, nil
 }
 
 // minTokenLength keeps the API token out of guessing range.
@@ -205,7 +242,7 @@ func mountAPI(d *daemon.Daemon, cfg *config.Config, jobs control.Jobs, log *slog
 	if len(token) < minTokenLength {
 		return fmt.Errorf("api.token_file: the token is too short (%d characters, at least %d): generate one with `openssl rand -hex 32`", len(token), minTokenLength)
 	}
-	api := &control.API{Jobs: jobs, ReadOnly: true, OriginPatterns: cfg.API.AllowedOrigins, MaxStreams: cfg.API.MaxStreams, Closing: d.Closing()}
+	api := &control.API{Jobs: jobs, Status: d.Status, ReadOnly: true, OriginPatterns: cfg.API.AllowedOrigins, MaxStreams: cfg.API.MaxStreams, Closing: d.Closing()}
 	d.Handle("/api/", http.StripPrefix("/api", control.RequireToken(token, api.Handler(), func(r *http.Request) {
 		log.Warn("API request refused: missing or wrong token", "remote", r.RemoteAddr, "path", r.URL.Path)
 	})))

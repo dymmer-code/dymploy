@@ -291,6 +291,97 @@ environment and with the network the file says. The Dockerfile is the repository
 
 ## Out of version 1, on purpose
 
-Secrets in the file; several targets in one file; automatic rollback; publishing anywhere but an S3 bucket (no SFTP); build matrices,
+Secrets in the file; inferred automatic rollback; publishing anywhere but an S3 bucket (no SFTP); build matrices,
 conditionals and including other files; templates. Each would need a version change (`version: 2`) or a backwards
 compatible extension.
+
+## Multiple deployment destinations
+
+`deploy.targets` is an ordered list of up to 32 **server-configured names**, mutually exclusive with
+`deploy.target`. `max_parallel` defaults to 1 and accepts 1–32. This is an additive version-1 extension:
+upgrade the executor before introducing these fields. Existing single-target manifests keep working.
+
+```yaml
+deploy:
+  targets: [web-a, web-b]
+  max_parallel: 1
+  steps:
+    - run: /opt/deploy/request-maintenance-and-wait
+    - run: /opt/deploy/install-release
+  check: {run: /opt/deploy/check-health}
+  after:
+    steps:
+      - run: /opt/deploy/report-success-and-release-maintenance
+  steps_undo:
+    - run: /opt/deploy/restore-previous-release
+    - run: /opt/deploy/check-health
+    - run: /opt/deploy/report-recovery-and-release-maintenance
+  finally:
+    steps:
+      - run: /opt/deploy/notify-result
+```
+
+Every destination is authorized **before building**. The build and packaging run once; each destination
+receives the same size/SHA-256-verified artifact, its own secrets source and its own lifecycle. Commands
+can use `DYMPLOY_TARGET` for destination-specific behavior; machines, credentials and permissions remain
+in server configuration. Multiple-target log lines carry `[target-name]` prefixes. `dymploy job` and its
+JSON/API `details.targets` show `running`, `succeeded`, `failed`, `aborted` or `skipped` per destination.
+
+A failure, including a failed deployment with successful recovery, prevents new destinations from
+starting. Destinations already running in parallel complete their own lifecycle. No already-successful
+destination is rolled back because another failed. Use the default sequential strategy when updating
+more than one destination at once would remove all healthy replicas.
+
+`dymploy retry <job>` reuses the recorded artifact and original deployment definition for a failed
+execution that reached deployment. It retries failed, aborted and skipped destinations, leaving successful
+ones alone. It checks current destination permissions again and verifies artifact identity, size and hash;
+it does not clone or start the build engine. Missing/expired artifacts produce an error, not a silent rebuild.
+The new execution retains `retry_of`, receives its own artifact copy and fetches current secrets.
+Runs without recorded deployment progress retain the existing full-job retry behavior. Retrying a fully
+successful run also retains that full-job behavior. After a failed retry, retry that newest run to preserve
+its latest per-destination results. Artifact retention still applies while a retry is waiting to start.
+
+`dymploy secrets` also accepts multiple destinations, with the same concurrency limit and stop-on-failure
+rules. It uses the existing, separate `secrets_steps` → `check` / `secrets_undo` lifecycle; it does not run
+normal deployment `after`, `steps_undo` or `finally` phases.
+
+## Cache compatibility and invalidation
+
+An optional literal `key` defines compatibility for a named cache. Changing it starts an empty generation;
+unchanged keys reuse the current generation. It is not tied automatically to the commit or lockfile.
+
+```yaml
+build:
+  cache:
+    - name: plt
+      path: /cache/plt
+      key: linux-amd64-otp29
+```
+
+The existing repository/branch isolation and age/size limits still apply. Definitions with only `name`
+and `path` retain their old caches until explicitly invalidated. The administrative commands use the
+owner-only control socket (no new public write endpoint):
+
+```sh
+dymploy cache list
+dymploy cache list github/acme/app --json
+dymploy cache invalidate github/acme/app --name plt
+dymploy cache invalidate github/acme/app --all --scope @branch-main --json
+```
+
+Omitting `--scope` selects every scope of that repository. To narrow it, use the exact scope from `list`:
+`repository`, `@branch-NAME`, `@tags` or `@other`. Invalidation requires exactly one of `--name`/`--all`.
+Listing exposes name, scope, generation, compatibility key (current generation), measured bytes, last use,
+active use and retirement. No other repository is invalidated.
+
+Invalidation atomically replaces each selected cache's current-generation pointer under the same lock
+used for build acquisition. It never renames or empties an active mount. Current builds keep their old
+generation; later builds get an empty one. Retired generations are removed only when unused; the command
+reports bytes reclaimed immediately. Ordinary age/size cleanup also collects unused retired generations.
+
+Pointers and use markers survive restart. Leases are stored outside mounted cache content under
+`@leases`, so a crash cannot make a still-running orphan container's cache look unused. A stale lease is
+conservatively retained: after verifying/stopping the orphan containers, an administrator may remove the
+corresponding stale lease files and let normal cleanup reclaim the retired generation. Do not remove a
+lease merely because the daemon restarted. Metadata corruption fails closed instead of following arbitrary
+paths. Cache scans do not traverse symlinks or user-created directories inside cached content.

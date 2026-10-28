@@ -76,6 +76,7 @@ func clone(j Job) Job {
 	}
 	j.Params = append(j.Params[:0:0], j.Params...)
 	j.Input = append(j.Input[:0:0], j.Input...)
+	j.Details = append(j.Details[:0:0], j.Details...)
 	return j
 }
 

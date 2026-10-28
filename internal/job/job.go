@@ -72,9 +72,10 @@ type Job struct {
 	Error string `json:"error,omitempty"`
 	// StopRequestedAt and StopReason are set the moment a stop is asked for, while the job is still
 	// stopping, and stay with the job as the record of why it was aborted.
-	StopRequestedAt time.Time `json:"stop_requested_at,omitzero"`
-	StopReason      string    `json:"stop_reason,omitempty"`
-	RetryOf         ID        `json:"retry_of,omitempty"`
+	StopRequestedAt time.Time       `json:"stop_requested_at,omitzero"`
+	StopReason      string          `json:"stop_reason,omitempty"`
+	Details         json.RawMessage `json:"details,omitempty"`
+	RetryOf         ID              `json:"retry_of,omitempty"`
 }
 
 // Filter selects jobs for List.

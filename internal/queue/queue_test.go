@@ -1188,3 +1188,42 @@ func TestAStopRequestAfterTheFinalStateIsRecordedChangesNothing(t *testing.T) {
 		t.Fatalf("the late stop request changed the job: %+v %v", got, err)
 	}
 }
+
+type progressPlanner struct{ fail bool }
+
+func (p *progressPlanner) Run(ctx context.Context, t runner.Task) (runner.Result, error) {
+	raw := json.RawMessage(`{"targets":[{"name":"a","state":"failed"}]}`)
+	if err := t.Report(raw); err != nil {
+		return runner.Result{}, err
+	}
+	return runner.Result{ExitCode: 5, Details: raw}, nil
+}
+func (p *progressPlanner) RetryInput(ctx context.Context, t runner.Task, raw json.RawMessage) (json.RawMessage, error) {
+	if p.fail {
+		return nil, errors.New("artifact unavailable")
+	}
+	return json.RawMessage(`{"retry":true}`), nil
+}
+func TestProgressPersistsAndRetryUsesRunnerPlan(t *testing.T) {
+	e := newEnv(t, Config{MaxConcurrent: 1}, nil)
+	p := &progressPlanner{}
+	e.m.d.Runners.Register("planned", p)
+	e.start(t)
+	j, err := e.m.Submit(context.Background(), Request{Name: "planned", Kind: "planned"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	finished := e.waitState(t, j.ID, job.Failed)
+	if !strings.Contains(string(finished.Details), "failed") {
+		t.Fatal("details lost")
+	}
+	next, err := e.m.Retry(context.Background(), j.ID)
+	if err != nil || !strings.Contains(string(next.Input), "retry") {
+		t.Fatal(next, err)
+	}
+	e.waitState(t, next.ID, job.Failed)
+	p.fail = true
+	if _, err := e.m.Retry(context.Background(), j.ID); err == nil {
+		t.Fatal("retry ignored missing artifact")
+	}
+}

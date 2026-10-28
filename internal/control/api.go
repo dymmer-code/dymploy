@@ -77,7 +77,8 @@ type Message struct {
 // API serves the jobs over HTTP. The same handler runs on the control socket (full access) and, read
 // only and behind a token, on the public listener.
 type API struct {
-	Jobs Jobs
+	Jobs   Jobs
+	Status func() Status
 	// ReadOnly leaves out cancelling and retrying.
 	ReadOnly bool
 	// OriginPatterns are the web origins allowed to open the live channel from a browser; clients that
@@ -94,6 +95,9 @@ type API struct {
 // Handler returns the routes, under /v1/.
 func (a *API) Handler() http.Handler {
 	mux := http.NewServeMux()
+	if a.Status != nil {
+		mux.HandleFunc("GET /v1/status", func(w http.ResponseWriter, r *http.Request) { reply(w, http.StatusOK, a.Status()) })
+	}
 	mux.HandleFunc("GET /v1/jobs", a.list)
 	mux.HandleFunc("GET /v1/jobs/{id}", a.get)
 	mux.HandleFunc("GET /v1/jobs/{id}/logs", a.logs)
