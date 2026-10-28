@@ -583,7 +583,9 @@ func (m *Manager) finishWaiting(ctx context.Context, j job.Job, state job.State,
 
 func (m *Manager) execute(ctx context.Context, r *running) {
 	defer m.wg.Done()
+	m.mu.Lock()
 	j := r.job
+	m.mu.Unlock()
 	var seq int64
 	logFailures := 0
 	rep := runner.NewLineReporter(func(s runner.Stream, text string) {
