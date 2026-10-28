@@ -393,7 +393,7 @@ MIT
 
 ## Durable run events
 
-The next release adds optional server-configured event receivers. Each receiver needs a unique stable
+Version v0.10.0 adds optional server-configured event receivers. Each receiver needs a unique stable
 name and a private signing-key file (at least 32 bytes). Configuration changes require a daemon restart.
 
 ```yaml
@@ -447,7 +447,7 @@ Only destinations with a recorded successful secrets delivery are compared. A su
 that no longer requests secrets removes that destination's baseline. Removed targets or sources do not
 produce warnings. No secret is applied merely by asking for status.
 
-## Deployment and cache administration in the next release
+## Deployment and cache administration (v0.10.0)
 
 - [Multiple destinations and artifact-only retries](docs/dymploy-yaml.md#multiple-deployment-destinations).
 - [Optional recovery and finalization](docs/dymploy-yaml.md#recovery-and-finalization).
