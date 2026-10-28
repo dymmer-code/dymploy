@@ -380,3 +380,16 @@ func TestSecretsStepsAreForChangingOnlyTheSecrets(t *testing.T) {
 		t.Fatalf("a definition without secrets_steps stays valid: %v", err)
 	}
 }
+
+func TestRecoveryAndFinallyValidation(t *testing.T) {
+	for _, fragment := range []string{
+		"  steps_undo: [{run: restore}]\n",
+		"  steps: [{run: install}]\n  steps_undo: [{run: ''}]\n",
+		"  steps: [{run: install}]\n  finally: {steps: []}\n",
+		"  steps: [{run: install}]\n  finally: {steps: [{run: ''}]}\n",
+	} {
+		if _, err := Parse([]byte(minimal + "deploy:\n  target: production\n" + fragment)); err == nil {
+			t.Fatalf("accepted invalid lifecycle: %s", fragment)
+		}
+	}
+}

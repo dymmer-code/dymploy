@@ -301,3 +301,13 @@ func TestTheSchemaAndTheParserAgreeOnValues(t *testing.T) {
 		})
 	}
 }
+
+func TestRecoverySchemaAcceptsNewFields(t *testing.T) {
+	src := minimal + "deploy:\n  target: production\n  steps: [{run: install}]\n  steps_undo: [{run: restore}]\n  finally: {steps: [{run: notify}]}\n"
+	if err := schemaValidate(t, src); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Parse([]byte(src)); err != nil {
+		t.Fatal(err)
+	}
+}

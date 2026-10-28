@@ -34,6 +34,7 @@ const (
 	ExitStep         = 5   // a deploy step failed
 	ExitCheck        = 6   // the health check never succeeded
 	ExitAfter        = 7   // the build is deployed and healthy, but an `after` step failed
+	ExitFinally      = 10  // finalization failed after an otherwise successful deployment
 	ExitPublish      = 8   // a file of the artifact could not be put in the bucket of an s3 target
 	ExitTimeout      = 124 // deploy.timeout ran out (same code as timeout(1))
 )
@@ -162,8 +163,8 @@ func (d *Deployer) AuthorizeDeploy(def *manifest.Deploy, ev provider.Event) (Tar
 		switch {
 		case d.Store == nil:
 			return Target{}, fmt.Errorf("target %q is a bucket and this server cannot put files in buckets", def.Target)
-		case len(def.Steps) > 0 || def.Check != nil || def.After != nil || def.Secrets || len(def.SecretsSteps) > 0:
-			return Target{}, fmt.Errorf("target %q is a bucket: the deploy of its definitions takes target and path only (no steps, check, after, secrets or secrets_steps)", def.Target)
+		case len(def.Steps) > 0 || def.Check != nil || def.After != nil || len(def.StepsUndo) > 0 || def.Finally != nil || def.Secrets || len(def.SecretsSteps) > 0:
+			return Target{}, fmt.Errorf("target %q is a bucket: the deploy of its definitions takes target and path only (no steps, check, after, steps_undo, finally, secrets or secrets_steps)", def.Target)
 		}
 		return t, nil
 	}
@@ -220,8 +221,9 @@ var unsafe = regexp.MustCompile(`[^A-Za-z0-9_.-]+`)
 // cannot be reached, the upload is damaged) or ctx was cancelled; a deployment that ran and failed is
 // an exit code.
 //
-// There is no automatic undo: if a step or the check fails, whatever the steps already did stays as it is.
-func (d *Deployer) Run(parent context.Context, r Request) (int, error) {
+// Optional steps_undo recovers failures of steps/check; finally attempts finalization. Without
+// configured recovery, changes already made stay in place. Recovery never clears a job failure.
+func (d *Deployer) Run(parent context.Context, r Request) (result int, runErr error) {
 	log := r.Log
 	ctx, cancel := context.WithTimeout(parent, r.Deploy.Timeout.D())
 	defer cancel()
@@ -280,6 +282,14 @@ func (d *Deployer) Run(parent context.Context, r Request) (int, error) {
 		}
 	}()
 
+	env := r.baseEnv(remote)
+	if remoteSecrets != "" {
+		env["DYMPLOY_SECRETS_FILE"] = remoteSecrets
+	}
+	phase := "upload"
+	defer func() {
+		d.finishDeployment(parent, conn, r, env, phase, &result, &runErr)
+	}()
 	if err := d.upload(ctx, conn, r, remote); err != nil {
 		return ended(err)
 	}
@@ -288,11 +298,7 @@ func (d *Deployer) Run(parent context.Context, r Request) (int, error) {
 			return ended(err)
 		}
 	}
-
-	env := r.baseEnv(remote)
-	if remoteSecrets != "" {
-		env["DYMPLOY_SECRETS_FILE"] = remoteSecrets
-	}
+	phase = "steps"
 	n := len(r.Deploy.Steps)
 	for i, s := range r.Deploy.Steps {
 		name := stepName(s.Name, i)
@@ -303,20 +309,20 @@ func (d *Deployer) Run(parent context.Context, r Request) (int, error) {
 		}
 		if code != 0 {
 			log.System(fmt.Sprintf("[%d/%d] %s failed with exit code %d", i+1, n, name, code))
-			d.noUndo(r)
 			return ExitStep, nil
 		}
 	}
+	phase = "check"
 	if c := r.Deploy.Check; c != nil {
 		ok, err := d.check(ctx, conn, r, env)
 		if err != nil {
 			return ended(err)
 		}
 		if !ok {
-			d.noUndo(r)
 			return ExitCheck, nil
 		}
 	}
+	phase = "after"
 	if r.Deploy.After != nil {
 		for i, s := range r.Deploy.After.Steps {
 			name := stepName(s.Name, i)

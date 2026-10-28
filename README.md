@@ -290,9 +290,13 @@ SHA-256 is **verified on the target before anything runs**, then `deploy.steps` 
 definition asks for secrets); database migrations stay on the target.
 
 Exit codes: 4 target missing or denied, 5 a deploy step failed, 6 the health check never passed, 7 an `after` step failed
-(the deployment itself is done), 124 `deploy.timeout` ran out. A target that cannot be reached or a damaged upload is an
-error of the runner instead. **There is no automatic undo**: on failure whatever the steps already did stays as it is and
-the log says so. The format has no `rollback` section on purpose (re-running the deploy of a previous job is being considered instead).
+(the deployment itself is done), 10 finalization failed, 124 `deploy.timeout` ran out. A target that cannot be reached or a damaged upload is an
+error of the runner instead. **Without configured recovery**, on failure whatever the steps already did stays as it is and
+the log says so. Optional `deploy.steps_undo` supplies explicit recovery after a step or health check fails;
+recovery stops on its first failure and never turns the failed job into a success. `deploy.finally.steps`
+attempts cleanup/notifications even after failure or cancellation, once connected to the SSH target.
+Neither feature changes existing manifests. See [deployment recovery](docs/dymploy-yaml.md#recovery-and-finalization)
+for time limits, status variables and maintenance handling.
 
 Nothing outside `internal/runner/docker` knows about containers (`internal/architecture` enforces it, and the same for SSH, which only `cmd` and `internal/deploy/sshremote` know). Tests against a
 real engine are tagged: `go test -tags integration ./internal/runner/docker/` (and `./internal/deploy/sshremote/` against a real OpenSSH, see the file's header) (set `DYMPLOY_IT_DIR` under your home when

@@ -38,6 +38,8 @@ deploy:                     # optional; without it the job only builds
   steps: [{name, run, env}]
   check: {run, attempts, interval, timeout}
   after: {steps: […]}       # optional
+  steps_undo: […]           # optional recovery
+  finally: {steps: […]}     # optional cleanup/notification
   secrets_steps: [{name, run, env}]   # optional: what `dymploy secrets` runs to change only the secrets (needs secrets: true)
   secrets_undo: [{name, run, env}]    # optional: put back what secrets_steps replaced if they or the check fail
 ```
@@ -117,7 +119,7 @@ sha256 on the target before running anything**; the upload is removed at the end
   A definition without `secrets_steps` is refused (exit code 9). The steps are those of the commit you name: use the branch
   that is deployed. The job goes through the same queue and policy as a deployment.
 - **`timeout`**: for the whole deployment (default 10m, at most 1h; it also bounds `dymploy secrets`).
-- **There is no automatic rollback**: if something fails, whatever the steps did stays as it is, and the log says so.
+- **Recovery is opt-in**: without `steps_undo`, a failed deployment leaves changes as they are. With it, the explicitly configured recovery commands run; dymploy does not infer how to restore an application.
 - If a job is stopped in the middle of a deployment, the remote command receives TERM and then KILL. OpenSSH delivers the
   signal to the command's shell, not to its whole tree, so steps should be short and safe to repeat.
 
@@ -127,12 +129,72 @@ sha256 on the target before running anything**; the upload is removed at the end
 |---|---|---|
 | The target does not exist or the repository may not use it | The job fails **before building**. | 4 |
 | The build fails | The job fails; nothing is deployed. | the step's |
-| A `deploy.steps` step fails | It stops; nothing is undone. | 5 |
+| A `deploy.steps` step fails | It stops; optional `steps_undo` runs. | 5 |
 | A file cannot be put in the bucket of an `s3` target (or fails its read-back) | It stops there; the files already put stay. | 8 |
-| `check` fails (attempts used up) | The same. | 6 |
-| All went well, `after` fails | The job fails; the deployment stays. | 7 |
-| `deploy.timeout` runs out | The command is stopped; nothing is undone. | 124 |
+| `check` fails (attempts used up) | Optional `steps_undo` runs. | 6 |
+| All went well, `after` fails | The job fails; the deployment stays; no recovery runs. | 7 |
+| Only `finally` fails | The job fails; the deployment stays. | 10 |
+| `deploy.timeout` runs out | The command stops; optional recovery runs if steps/check had started. | 124 |
 | Target unreachable, damaged upload (sha256 differs), job stopped | An error of the runner (not of the file); a stopped job ends `aborted` with its reason. | — |
+
+### Recovery and finalization
+
+These optional fields extend version 1 for **SSH deployments only**. Existing definitions keep their
+behavior. Older dymploy binaries reject the new keys: upgrade the executor before adding them to a repository.
+`dymploy secrets` keeps its separate `secrets_steps`/`secrets_undo` flow and does not run these new phases.
+
+- `steps_undo`: a list with the same format as `steps`. Runs after a failing step or health check,
+  including command/transport errors and deployment timeout. It stops on the first recovery failure.
+  It does not run after an `after` failure, before deployment steps begin, or on an explicit cancellation.
+  Cancellation may mean authorization was revoked; recovering or unlocking automatically would be unsafe.
+- `finally: {steps: [...]}`: independent notification/cleanup commands, attempted after success, failure
+  or cancellation once an SSH connection has been established, including upload failures. Each step is
+  attempted even if an earlier finalization step fails, until its time budget expires. It runs before
+  the uploaded artifact and secrets are cleaned up. No commands can run if connecting or fetching secrets
+  failed; a broken connection, daemon crash, SIGKILL or power loss also prevents guaranteed delivery.
+- Recovery and finalization each have a separate **two-minute total budget**, outside `deploy.timeout`.
+  A deployment can therefore take up to four additional minutes to recover/finalize. A successful
+  recovery preserves the original job failure; a failed finalization also preserves any original failure,
+  or returns exit 10 if the deployment had otherwise succeeded.
+
+Recovery/finalization receive these reserved variables (step `env` cannot override them):
+
+| Variable | Values |
+|---|---|
+| `DYMPLOY_DEPLOY_STATUS` | `succeeded`, `failed`, `aborted` (outcome before finalization) |
+| `DYMPLOY_FAILED_PHASE` | `upload`, `steps`, `check`, `after`, or empty on success |
+| `DYMPLOY_EXIT_CODE` | Original exit code; transport errors/cancellation may have 0, so use status too |
+| `DYMPLOY_UNDO_STATUS` | `not_run`, `skipped` (cancellation), `succeeded`, `failed`; available to finalization |
+
+Maintenance must be released only in `after` or **after restoring and checking health in `steps_undo`**.
+Never release it in `finally`. dymploy does not know any maintenance API: the commands below are example
+scripts provided by the application/operator, not built-in commands or a released `dym` API.
+
+```yaml
+deploy:
+  target: production
+  steps:
+    - run: /opt/deploy/request-maintenance-and-wait
+    - run: /opt/deploy/install-release
+  check:
+    run: /opt/deploy/check-health
+  after:
+    steps:
+      - run: /opt/deploy/report-success-and-release-maintenance
+  steps_undo:
+    - run: /opt/deploy/restore-previous-release
+    - run: /opt/deploy/check-health
+    - run: /opt/deploy/report-recovery-and-release-maintenance
+  finally:
+    steps:
+      - run: /opt/deploy/notify-result
+```
+
+Recovery scripts must be safe after partial execution, including failure of the first step. Persist a
+per-run marker before changing the application; restore/unlock only if that run actually owns maintenance
+and has a valid previous release. If rollback or its health check fails, later steps do not run and the
+target remains in maintenance for manual intervention. Retries and callbacks should be idempotent.
+A successful command is the script's contract, not an independent health guarantee from dymploy.
 
 ## Variables dymploy gives to the commands
 
@@ -184,7 +246,7 @@ deploy:
   path: books/        # optional prefix; default the root of the bucket
 ```
 
-A bucket takes `target`, `path` and `timeout`; `steps`, `check`, `after`, `secrets` and `secrets_steps` are refused before building (exit
+A bucket takes `target`, `path` and `timeout`; `steps`, `check`, `after`, `steps_undo`, `finally`, `secrets` and `secrets_steps` are refused before building (exit
 code 4), and so is `path` on a machine. What is put is every regular file of the artifact archive under the name it has
 there (each of `artifact.paths` is stored under its base name, so `out/book.pdf` becomes `<path>book.pdf`, and a directory
 keeps its tree); links and special files are skipped, and said in the log. Each file is sent with its content type and its

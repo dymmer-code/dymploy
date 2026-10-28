@@ -179,6 +179,16 @@ func (v *validator) deploy(d *Deploy) {
 		v.add("deploy.path", "%q is not a valid path: relative, inside the bucket", d.Path)
 	}
 	v.deploySteps("deploy.steps", d.Steps)
+	v.deploySteps("deploy.steps_undo", d.StepsUndo)
+	if len(d.StepsUndo) > 0 && len(d.Steps) == 0 {
+		v.add("deploy.steps_undo", "there is nothing to undo without deploy.steps")
+	}
+	if d.Finally != nil {
+		if len(d.Finally.Steps) == 0 {
+			v.add("deploy.finally.steps", "a finally section needs at least one step")
+		}
+		v.deploySteps("deploy.finally.steps", d.Finally.Steps)
+	}
 	v.deploySteps("deploy.secrets_steps", d.SecretsSteps)
 	v.deploySteps("deploy.secrets_undo", d.SecretsUndo)
 	if len(d.SecretsSteps) > 0 && !d.Secrets {
