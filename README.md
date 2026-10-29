@@ -456,3 +456,66 @@ produce warnings. No secret is applied merely by asking for status.
 All new manifest fields are optional version-1 extensions. Upgrade the executor before using them;
 older executors correctly reject keys they do not understand. No release or production configuration is
 changed by adding these capabilities to the source tree.
+
+## Dymmer control plane (optional)
+
+Dymploy can open an authenticated outgoing WebSocket to Dymmer. The normal listener,
+webhooks and local CLI continue to work independently; a disconnected control plane
+never stops builds. This feature is disabled unless `control_plane.url` is configured.
+
+```yaml
+control_plane:
+  url: wss://dymmer.example/builders/websocket
+  builder_id: the-builder-profile-uuid
+  token_file: /etc/dymploy/dymmer-profile-token
+  ssh_keys:
+    shop-key: /etc/dymploy/keys/shop
+  known_hosts:
+    rowan: /etc/dymploy/known_hosts
+  secrets:
+    shop-secrets: shop-prod # reference -> existing local target name
+```
+
+The token is the builder profile's secret, in a file readable only by the service user
+(mode `0600`). Dymmer also checks the source IP against that profile's host inventory.
+TLS certificate verification is mandatory; credentials are sent in the handshake header,
+never the URL. Rotating the token file takes effect on the next connection.
+
+Dymmer supplies app definitions, not executable local configuration. The target name,
+host, SSH port, user, upload directory and credential references must agree with the
+existing local `targets` catalogue. `ssh_keys` and `known_hosts` map opaque references to
+local paths. A nonempty `secrets_ref` must map to that target's existing secret source.
+The existing local repository/ref/installation policy still applies. Queue limits,
+container resources, secret commands, runner settings and retention cannot be changed
+through this connection. Target changes require a restart when the control plane is enabled.
+
+Review each downloaded app definition and accept its exact digest locally:
+
+```sh
+dymploy apps list
+dymploy apps accept APP_UUID --digest DIGEST_FROM_LIST
+dymploy apps revoke APP_UUID
+```
+
+Acceptance pins the control-plane URL, builder, app, owner, project, repository, refs and
+destinations. A changed or removed definition invalidates approval. The GitHub App's
+repository access is a separate requirement: local acceptance cannot grant that access.
+Revocation prevents new remote requests and log access; already accepted jobs finish.
+
+The channel supports status, enqueue, abort, history, job details, paged logs and up to four
+live log subscriptions. Requests are correlated, bounded and authorized again on both ends.
+Enqueue request IDs are idempotent within retained job history. A request for a different ref
+or definition must use a new ID. Commands carry the current configuration revision, so an
+update cannot accidentally execute against an old cached definition.
+
+Jobs retain their source, app, owner and project. Another app sharing the repository cannot
+read or abort them, and transferring an app does not expose the previous owner's history.
+New webhook builds are associated only when exactly one accepted app matches the repository,
+ref and installation. Legacy jobs and ambiguous webhook builds stay accessible through the
+local CLI, without guessing a tenant association.
+
+History and logs remain solely in dymploy's existing stores and follow `queue.keep_jobs`,
+`queue.keep_days` and `queue.log_max_bytes`. Live logs use their durable sequence cursor;
+a reconnect resumes after that cursor. Expired jobs return `not_found`; truncation remains
+visible in the stored log. Slow readers are disconnected without blocking the queue.
+Dymmer reconciles history after reconnecting; state events are hints, not a second history.

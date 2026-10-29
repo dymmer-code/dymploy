@@ -23,6 +23,7 @@ type Submitter interface {
 
 // Enqueuer implements webhook.Enqueuer on top of a queue.
 type Enqueuer struct {
+	scope  func(provider.Event) (*job.Origin, []string)
 	sub    Submitter
 	kind   string
 	params json.RawMessage
@@ -81,7 +82,17 @@ func (e *Enqueuer) Enqueue(ctx context.Context, ev provider.Event) error {
 			return err
 		}
 	}
-	_, err := e.Submit(ctx, ev)
+	var err error
+	if e.scope != nil {
+		origin, targets := e.scope(ev)
+		if origin != nil {
+			_, err = e.SubmitScoped(ctx, ev, *origin, targets)
+		} else {
+			_, err = e.Submit(ctx, ev)
+		}
+	} else {
+		_, err = e.Submit(ctx, ev)
+	}
 	switch {
 	case errors.Is(err, queue.ErrQueueFull):
 		return webhook.ErrQueueFull
@@ -102,4 +113,43 @@ func (e *Enqueuer) Submit(ctx context.Context, ev provider.Event) (job.Job, erro
 	return e.sub.Submit(ctx, queue.Request{
 		Name: ev.Provider + "/" + ev.FullName, Kind: e.kind, Params: e.params, Input: input,
 	})
+}
+
+// SubmitScoped preserves local runner parameters and adds the app's target restriction.
+func (e *Enqueuer) SubmitScoped(ctx context.Context, ev provider.Event, origin job.Origin, targets []string) (job.Job, error) {
+	origin.Commit = ev.Commit
+	if origin.Trigger == "" {
+		origin.Trigger = "user"
+	}
+	if e.kind != "docker" {
+		return job.Job{}, errors.New("application jobs require the docker runner")
+	}
+	params := map[string]any{}
+	if len(e.params) > 0 {
+		if err := json.Unmarshal(e.params, &params); err != nil {
+			return job.Job{}, err
+		}
+	}
+	if params == nil {
+		params = map[string]any{}
+	}
+	if targets == nil {
+		targets = []string{}
+	}
+	params["allowed_targets"] = targets
+	raw, err := json.Marshal(params)
+	if err != nil {
+		return job.Job{}, err
+	}
+	input, err := json.Marshal(ev)
+	if err != nil {
+		return job.Job{}, err
+	}
+	return e.sub.Submit(ctx, queue.Request{Name: ev.Provider + "/" + ev.FullName, Kind: e.kind, Params: raw, Input: input, Origin: &origin})
+}
+
+// WithScope adds app provenance to matching webhook jobs. Configure before starting intake.
+func (e *Enqueuer) WithScope(fn func(provider.Event) (*job.Origin, []string)) *Enqueuer {
+	e.scope = fn
+	return e
 }

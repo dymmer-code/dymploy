@@ -19,7 +19,8 @@ import (
 // Config is the daemon configuration. Everything that is specific to an installation
 // (listen address, paths) lives here, never in the code.
 type Config struct {
-	Events EventsConfig `yaml:"events"`
+	ControlPlane ControlPlaneConfig `yaml:"control_plane"`
+	Events       EventsConfig       `yaml:"events"`
 	// Listen is the HTTP address for webhooks and the API.
 	Listen string `yaml:"listen"`
 	// ControlSocket is the Unix socket the CLI uses to talk to the running daemon.
@@ -266,6 +267,9 @@ func Load(path string) (*Config, error) {
 
 // Validate checks the values that would otherwise fail later and far from the cause.
 func (c *Config) Validate() error {
+	if err := c.ControlPlane.validate(); err != nil {
+		return err
+	}
 	seenSinks := map[string]bool{}
 	if len(c.Events.Sinks) > 32 {
 		return fmt.Errorf("events.sinks: at most 32 sinks")

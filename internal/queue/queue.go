@@ -71,11 +71,12 @@ type Deps struct {
 
 // Errors returned by the Manager.
 var (
-	ErrQueueFull   = errors.New("the queue is full")
-	ErrRejected    = errors.New("a job with this name is already waiting or running")
-	ErrFinished    = errors.New("the job has already finished")
-	ErrNotFinished = errors.New("only a finished job can be retried")
-	ErrClosed      = errors.New("the queue is not accepting jobs")
+	ErrIdempotencyConflict = errors.New("idempotency key already used for a different request")
+	ErrQueueFull           = errors.New("the queue is full")
+	ErrRejected            = errors.New("a job with this name is already waiting or running")
+	ErrFinished            = errors.New("the job has already finished")
+	ErrNotFinished         = errors.New("only a finished job can be retried")
+	ErrClosed              = errors.New("the queue is not accepting jobs")
 	// ErrDraining is returned for new jobs while dymploy waits for the work in hand to end before
 	// stopping. Senders should try again later (or elsewhere).
 	ErrDraining = errors.New("dymploy is shutting down and not accepting new jobs")
@@ -91,8 +92,9 @@ func (c *StopCause) Error() string { return "stop requested: " + c.Reason }
 
 // Request describes a job to submit.
 type Request struct {
-	Name string // jobs with the same name run one at a time
-	Kind string // selects the runner
+	Origin *job.Origin
+	Name   string // jobs with the same name run one at a time
+	Kind   string // selects the runner
 	// Params and Input are carried to the runner without being looked at.
 	Params  json.RawMessage
 	Input   json.RawMessage
@@ -283,6 +285,27 @@ func (m *Manager) Submit(ctx context.Context, r Request) (job.Job, error) {
 	if !m.open {
 		return job.Job{}, ErrClosed
 	}
+	if r.Origin != nil {
+		origin := *r.Origin
+		r.Origin = &origin
+		if origin.Source == "" || origin.App == "" || origin.Ref == "" {
+			return job.Job{}, errors.New("incomplete job origin")
+		}
+		if origin.Request != "" {
+			previous, err := m.d.Store.List(ctx, job.Filter{Source: origin.Source, App: origin.App, Owner: origin.Owner, Project: origin.Project})
+			if err != nil {
+				return job.Job{}, err
+			}
+			for _, old := range previous {
+				if old.Origin.Request == origin.Request {
+					if old.Origin.Definition != origin.Definition || old.Origin.Ref != origin.Ref || old.Name != r.Name || old.Kind != r.Kind {
+						return job.Job{}, ErrIdempotencyConflict
+					}
+					return old, nil
+				}
+			}
+		}
+	}
 	superseded := -1
 	switch m.cfg.OnBusy {
 	case Reject:
@@ -302,7 +325,7 @@ func (m *Manager) Submit(ctx context.Context, r Request) (job.Job, error) {
 	}
 	j := job.Job{
 		ID: m.d.NewID(now), Name: r.Name, Number: number, Kind: r.Kind, State: job.Queued,
-		Params: r.Params, Input: r.Input, CreatedAt: now, RetryOf: r.RetryOf,
+		Origin: r.Origin, Params: r.Params, Input: r.Input, CreatedAt: now, RetryOf: r.RetryOf,
 	}
 	if err := m.d.Store.Put(ctx, j); err != nil {
 		return job.Job{}, fmt.Errorf("storing the job: %w", err)
@@ -470,7 +493,13 @@ func (m *Manager) Retry(ctx context.Context, id job.ID) (job.Job, error) {
 			}
 		}
 	}
-	return m.Submit(ctx, Request{Name: j.Name, Kind: j.Kind, Params: j.Params, Input: input, RetryOf: j.ID})
+	origin := j.Origin
+	if origin != nil {
+		copy := *origin
+		copy.Request = ""
+		origin = &copy
+	}
+	return m.Submit(ctx, Request{Origin: origin, Name: j.Name, Kind: j.Kind, Params: j.Params, Input: input, RetryOf: j.ID})
 }
 
 // Get returns a job.

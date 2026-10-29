@@ -117,6 +117,11 @@ func (r *Runner) Run(ctx context.Context, t runner.Task) (runner.Result, error) 
 	}
 	log.System("manifest: " + m.Summary())
 
+	if m.HasDeploy() {
+		if err := params.authorizeTargets(m.Deploy.TargetNames()); err != nil {
+			return runner.Result{}, err
+		}
+	}
 	var targets []deploy.Target
 	if m.HasDeploy() && r.cfg.NoDeploy {
 		log.System("this definition deploys to " + strings.Join(m.Deploy.TargetNames(), ",") + ": not delivered in this run")

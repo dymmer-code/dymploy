@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -66,6 +67,10 @@ func (q queueJobs) Retry(ctx context.Context, id job.ID) (job.Job, error) {
 // Enqueue starts a job by hand. It is not a way around anything: the reference is resolved by the
 // provider and the resulting event must pass the same policy as a webhook would.
 func (q queueJobs) Enqueue(ctx context.Context, r control.EnqueueRequest) (job.Job, error) {
+	return q.enqueue(ctx, r, nil, nil, nil)
+}
+
+func (q queueJobs) enqueue(ctx context.Context, r control.EnqueueRequest, origin *job.Origin, targets []string, installations []int64) (job.Job, error) {
 	name, owner, repo, err := q.splitRepo(r.Repo)
 	if err != nil {
 		return job.Job{}, err
@@ -88,6 +93,9 @@ func (q queueJobs) Enqueue(ctx context.Context, r control.EnqueueRequest) (job.J
 		q.log.Warn("audit: manual job refused by the policy", "repo", ev.FullName, "ref", ev.Ref, "reason", why)
 		return job.Job{}, fmt.Errorf("%w: the policy does not allow it (%s)", control.ErrForbidden, why)
 	}
+	if len(installations) > 0 && !slices.Contains(installations, ev.InstallationID) {
+		return job.Job{}, control.ErrForbidden
+	}
 	enq, what := q.enq, "job"
 	if r.Secrets {
 		if q.secretsEnq == nil {
@@ -95,7 +103,12 @@ func (q queueJobs) Enqueue(ctx context.Context, r control.EnqueueRequest) (job.J
 		}
 		enq, what = q.secretsEnq, "secrets job"
 	}
-	j, err := enq.Submit(ctx, *ev)
+	var j job.Job
+	if origin != nil {
+		j, err = enq.SubmitScoped(ctx, *ev, *origin, targets)
+	} else {
+		j, err = enq.Submit(ctx, *ev)
+	}
 	q.log.Info("audit: "+what+" started by hand through the control socket", "repo", ev.FullName, "ref", ev.Ref, "commit", ev.Commit, "job", j.ID, "ok", err == nil)
 	return j, conflict(err)
 }

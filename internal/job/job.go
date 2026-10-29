@@ -50,10 +50,25 @@ func (s State) Final() bool {
 	return false
 }
 
+// Origin binds a remotely requested job to its control plane and application.
+// Request is an idempotency key within retained history; Ref records the requested ref.
+type Origin struct {
+	Commit     string `json:"commit,omitempty"`
+	Trigger    string `json:"trigger,omitempty"`
+	Owner      string `json:"owner"`
+	Project    string `json:"project"`
+	Definition string `json:"definition,omitempty"`
+	Source     string `json:"source"`
+	App        string `json:"app"`
+	Request    string `json:"request,omitempty"`
+	Ref        string `json:"ref"`
+}
+
 // Job is one unit of work and its history.
 type Job struct {
-	ID   ID     `json:"id"`
-	Name string `json:"name"`
+	Origin *Origin `json:"origin,omitempty"`
+	ID     ID      `json:"id"`
+	Name   string  `json:"name"`
 	// Number is the run number within the name: the first run of github/acme/app is #1, the next #2…
 	// Numbers are never reused, so "github/acme/app #12" always means the same run.
 	Number int    `json:"number,omitempty"`
@@ -80,14 +95,34 @@ type Job struct {
 
 // Filter selects jobs for List.
 type Filter struct {
-	States []State // any of these; empty means any
-	Name   string  // exact name; empty means any
-	Number int     // run number within the name; 0 means any
-	Limit  int     // 0 means no limit
+	Before  ID
+	Owner   string
+	Project string
+	Source  string
+	App     string
+	States  []State // any of these; empty means any
+	Name    string  // exact name; empty means any
+	Number  int     // run number within the name; 0 means any
+	Limit   int     // 0 means no limit
 }
 
 // Matches reports whether j passes the filter (the limit aside).
 func (f Filter) Matches(j Job) bool {
+	if f.Before != "" && j.ID >= f.Before {
+		return false
+	}
+	if f.Owner != "" && (j.Origin == nil || j.Origin.Owner != f.Owner) {
+		return false
+	}
+	if f.Project != "" && (j.Origin == nil || j.Origin.Project != f.Project) {
+		return false
+	}
+	if f.Source != "" && (j.Origin == nil || j.Origin.Source != f.Source) {
+		return false
+	}
+	if f.App != "" && (j.Origin == nil || j.Origin.App != f.App) {
+		return false
+	}
 	if f.Name != "" && j.Name != f.Name {
 		return false
 	}

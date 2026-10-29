@@ -70,6 +70,10 @@ func (m *MemStore) NextNumber(_ context.Context, name string) (int, error) {
 
 // clone copies the pointer and slice fields so callers cannot alias stored data.
 func clone(j Job) Job {
+	if j.Origin != nil {
+		origin := *j.Origin
+		j.Origin = &origin
+	}
 	if j.ExitCode != nil {
 		c := *j.ExitCode
 		j.ExitCode = &c

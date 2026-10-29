@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strconv"
 	"time"
 
@@ -12,6 +13,8 @@ import (
 
 // Params is the runner's configuration (runner.params in the daemon's configuration).
 type Params struct {
+	// AllowedTargets narrows an app job to locally accepted targets; nil leaves ordinary jobs unchanged.
+	AllowedTargets []string `json:"allowed_targets"`
 	// Depth and Submodules are for the clone that precedes the build. Submodules are refused: a build
 	// could alter the git directories of its submodules and have the daemon run what it planted.
 	Depth      int  `json:"depth"`
@@ -151,4 +154,16 @@ func (p Params) resolve(l manifest.Limits) (effective, error) {
 		e.timeout = t
 	}
 	return e, nil
+}
+
+func (p Params) authorizeTargets(names []string) error {
+	if p.AllowedTargets == nil {
+		return nil
+	}
+	for _, name := range names {
+		if !slices.Contains(p.AllowedTargets, name) {
+			return fmt.Errorf("target %q is not accepted for this application", name)
+		}
+	}
+	return nil
 }

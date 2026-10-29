@@ -23,7 +23,7 @@ func NewRootCmd(version string) *cobra.Command {
 		SilenceUsage:  true,
 		SilenceErrors: false,
 	}
-	root.AddCommand(newCacheCmd(), newVersionCmd(version), newServeCmd(version), newStatusCmd(version), newReloadCmd(), newJobsCmd(), newJobCmd(), newLogsCmd(), newAbortCmd(), newStopCmd(), newRetryCmd(), newWatchCmd(), newQueueCmd(), newSecretsCmd(), newTryCmd(), newValidateCmd(), newSchemaCmd())
+	root.AddCommand(newAppsCmd(), newCacheCmd(), newVersionCmd(version), newServeCmd(version), newStatusCmd(version), newReloadCmd(), newJobsCmd(), newJobCmd(), newLogsCmd(), newAbortCmd(), newStopCmd(), newRetryCmd(), newWatchCmd(), newQueueCmd(), newSecretsCmd(), newTryCmd(), newValidateCmd(), newSchemaCmd())
 	return root
 }
 

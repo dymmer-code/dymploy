@@ -161,3 +161,41 @@ func TestTheCheckCanBeSwitchedOffAndNeverAppliesToAPersonSubmitting(t *testing.T
 		t.Fatal(err)
 	}
 }
+
+func TestScopedSubmissionPreservesLimitsAndRestrictsTargets(t *testing.T) {
+	s := &submitter{}
+	origin := job.Origin{Source: "builder", App: "app", Ref: "refs/heads/main"}
+	enq := New(s, "docker", json.RawMessage(`{"limits":{"memory":"2g"}}`))
+	if _, err := enq.SubmitScoped(context.Background(), ev, origin, nil); err != nil {
+		t.Fatal(err)
+	}
+	var params map[string]any
+	_ = json.Unmarshal(s.got.Params, &params)
+	if s.got.Origin.App != "app" || params["limits"].(map[string]any)["memory"] != "2g" || len(params["allowed_targets"].([]any)) != 0 {
+		t.Fatal(s.got)
+	}
+	for _, raw := range []json.RawMessage{nil, json.RawMessage(`null`), json.RawMessage(`{}`)} {
+		if _, err := New(s, "docker", raw).SubmitScoped(context.Background(), ev, origin, []string{"rowan"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := New(s, "docker", json.RawMessage(`{`)).SubmitScoped(context.Background(), ev, origin, nil); err == nil {
+		t.Fatal("bad parameters")
+	}
+	if _, err := New(s, "dryrun", nil).SubmitScoped(context.Background(), ev, origin, nil); err == nil {
+		t.Fatal("unsupported runner")
+	}
+}
+
+func TestWebhookScopeAddsProvenanceWithoutChangingUnmatchedJobs(t *testing.T) {
+	s := &submitter{}
+	origin := job.Origin{Source: "builder", App: "app", Owner: "owner", Project: "project", Ref: "refs/heads/main"}
+	e := New(s, "docker", nil).WithScope(func(provider.Event) (*job.Origin, []string) { return &origin, []string{"rowan"} })
+	if err := e.Enqueue(context.Background(), ev); err != nil || s.got.Origin == nil || s.got.Origin.App != "app" {
+		t.Fatal(s.got, err)
+	}
+	e.WithScope(func(provider.Event) (*job.Origin, []string) { return nil, nil })
+	if err := e.Enqueue(context.Background(), ev); err != nil || s.got.Origin != nil {
+		t.Fatal(s.got, err)
+	}
+}

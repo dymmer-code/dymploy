@@ -18,6 +18,7 @@ import (
 	"github.com/dymmer-code/dymploy/internal/checkout"
 	"github.com/dymmer-code/dymploy/internal/config"
 	"github.com/dymmer-code/dymploy/internal/control"
+	"github.com/dymmer-code/dymploy/internal/controlplane"
 	"github.com/dymmer-code/dymploy/internal/daemon"
 	"github.com/dymmer-code/dymploy/internal/deploy"
 	"github.com/dymmer-code/dymploy/internal/deploy/s3store"
@@ -98,6 +99,19 @@ func newServeCmd(version string) *cobra.Command {
 			hooks := buildReceiver(cfg, log, providers, enq)
 			secretsEnq := intake.New(mgr, secretsjob.Kind, nil)
 			jobs := queueJobs{m: mgr, log: log, providers: providers, hooks: hooks, enq: enq, secretsEnq: secretsEnq}
+			if cfg.ControlPlane.URL != "" {
+				service := &controlplane.Service{Catalog: appCatalog(cfg), Jobs: jobs,
+					Check: func(a controlplane.Application) error { return controlplane.CheckLocal(cfg, a) },
+					Enqueue: func(ctx context.Context, a controlplane.Application, origin job.Origin) (job.Job, error) {
+						return jobs.enqueue(ctx, control.EnqueueRequest{Repo: a.RepositoryName(), Ref: origin.Ref}, &origin, a.TargetNames(), a.Repository.InstallationIDs)
+					},
+				}
+				enq.WithScope(service.Associate)
+				client := &controlplane.Client{URL: cfg.ControlPlane.URL, TokenFile: cfg.ControlPlane.TokenFile, Service: service, Log: log}
+				linkCtx, stopLink := context.WithCancel(ctx)
+				defer stopLink()
+				go client.Run(linkCtx)
+			}
 			rl := &reloader{path: configPath, cur: cfg, hooks: hooks, remote: remote, store: store, targets: targets, mgr: mgr, log: log}
 			reloadOnSIGHUP(ctx, rl)
 			d := daemon.New(cfg, version).OnReload(rl.Reload).WithJobs(jobs).WithSecretStatus(func() []control.SecretStatus {

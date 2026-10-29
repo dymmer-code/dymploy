@@ -99,6 +99,13 @@ func (r *Runner) retryPlan(req deployRetry) (*manifest.Manifest, artifact.Record
 }
 
 func (r *Runner) retryDeploy(ctx context.Context, t runner.Task, req deployRetry) (runner.Result, error) {
+	params, err := ParseParams(t.Params)
+	if err != nil {
+		return runner.Result{}, err
+	}
+	if err := params.authorizeTargets(req.Targets); err != nil {
+		return runner.Result{}, err
+	}
 	m, rec, file, err := r.retryPlan(req)
 	if err != nil {
 		return runner.Result{}, err

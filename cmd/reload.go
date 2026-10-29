@@ -114,7 +114,7 @@ func needRestart(a, b *config.Config) []string {
 	t := va.Type()
 	for i := 0; i < t.NumField(); i++ {
 		key := strings.Split(t.Field(i).Tag.Get("yaml"), ",")[0]
-		if key == "policy" || key == "targets" { // applied while running
+		if key == "policy" || (key == "targets" && a.ControlPlane.URL == "" && b.ControlPlane.URL == "") { // applied while running
 			continue
 		}
 		if !reflect.DeepEqual(va.Field(i).Interface(), vb.Field(i).Interface()) {
