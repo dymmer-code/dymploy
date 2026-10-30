@@ -20,6 +20,14 @@ var (
 	shaRE  = regexp.MustCompile(`^[0-9a-f]{40}([0-9a-f]{24})?$`)
 )
 
+// InstallationID tells which installation of the GitHub App covers a repository. It fails when no App is configured.
+func (p *Provider) InstallationID(ctx context.Context, owner, repo string) (int64, error) {
+	if p.app == nil {
+		return 0, errors.New("no GitHub App is configured")
+	}
+	return p.app.installationID(ctx, owner, repo)
+}
+
 // installationID asks GitHub which installation of the App covers a repository.
 func (a *App) installationID(ctx context.Context, owner, repo string) (int64, error) {
 	jwt, err := a.jwt()

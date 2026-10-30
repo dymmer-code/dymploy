@@ -20,6 +20,11 @@ type Client struct {
 	URL, TokenFile                                                  string
 	Service                                                         *Service
 	Log                                                             *slog.Logger
+	// Inventory, when set, says what this daemon can do (see Inventory). It is sent once the channel is ready and again
+	// every InventoryEvery (ten minutes by default), so a change in the catalogue reaches the other side without a restart.
+	// It may ask other services, so it runs apart from the loop; whatever it returns is sent as it is.
+	Inventory      func(context.Context) any
+	inventoryEvery time.Duration
 }
 type frame struct {
 	Topic, Event, Ref string
@@ -156,6 +161,24 @@ func (c *Client) session(ctx context.Context) error {
 	tick := time.NewTicker(tickEvery)
 	defer tick.Stop()
 	watches := map[string]Command{}
+	inventories := make(chan any, 1)
+	askInventory := func() {
+		if c.Inventory == nil {
+			return
+		}
+		go func() {
+			askCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+			defer cancel()
+			if inv := c.Inventory(askCtx); inv != nil {
+				select {
+				case inventories <- inv:
+				default:
+				}
+			}
+		}()
+	}
+	inventoryEvery := durationOr(c.inventoryEvery, 10*time.Minute)
+	lastInventory := time.Now()
 	ready := false
 	lastReply := time.Now()
 	lastSync := time.Now()
@@ -178,6 +201,13 @@ func (c *Client) session(ctx context.Context) error {
 				continue
 			}
 			if err := write("builder:control", "event", "", map[string]any{"app": event.Job.Origin.App, "type": event.Type}); err != nil {
+				return err
+			}
+		case inv := <-inventories:
+			if !ready {
+				continue
+			}
+			if err := write("builder:control", "inventory", "", inv); err != nil {
 				return err
 			}
 		case result := <-results:
@@ -208,9 +238,14 @@ func (c *Client) session(ctx context.Context) error {
 					if err := c.Service.Catalog.Update(snapshot); err != nil {
 						return ErrPending
 					}
+					first := !ready
 					ready = true
 					if err := write("builder:control", "ready", "", map[string]any{"revision": snapshot.Revision}); err != nil {
 						return err
+					}
+					if first {
+						lastInventory = time.Now()
+						askInventory()
 					}
 				}
 			}
@@ -260,6 +295,10 @@ func (c *Client) session(ctx context.Context) error {
 					return err
 				}
 				lastHeartbeat = now
+			}
+			if ready && now.Sub(lastInventory) >= inventoryEvery {
+				lastInventory = now
+				askInventory()
 			}
 			if ready && now.Sub(lastSync) >= syncEvery {
 				if err := write("builder:control", "configuration", "configuration", map[string]any{}); err != nil {

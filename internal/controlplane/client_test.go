@@ -237,3 +237,63 @@ func TestClientReconnectsAfterFailureWithoutAffectingJobs(t *testing.T) {
 		t.Fatal("connection failure erased local approval", err)
 	}
 }
+
+func TestClientSendsItsInventoryOnceReadyAndAgainLater(t *testing.T) {
+	s, _, snapshot := testService(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	received := make(chan string, 4)
+	failure := make(chan error, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			failure <- err
+			return
+		}
+		defer conn.CloseNow()
+		for {
+			_, raw, err := conn.Read(ctx)
+			if err != nil {
+				return
+			}
+			f, err := decodeFrame(raw)
+			if err != nil {
+				failure <- err
+				return
+			}
+			switch f.Event {
+			case "phx_join":
+				reply, _ := json.Marshal([]any{"1", "join", "builder:control", "phx_reply", map[string]any{"status": "ok", "response": snapshot}})
+				_ = conn.Write(ctx, websocket.MessageText, reply)
+			case "inventory":
+				received <- string(f.Payload)
+			}
+		}
+	}))
+	defer server.Close()
+	path := filepath.Join(t.TempDir(), "token")
+	_ = os.WriteFile(path, []byte(strings.Repeat("x", 43)), 0600)
+	asked := 0
+	c := Client{URL: "ws" + strings.TrimPrefix(server.URL, "http"), TokenFile: path, Service: s,
+		tickInterval: 20 * time.Millisecond, inventoryEvery: 100 * time.Millisecond,
+		Inventory: func(context.Context) any {
+			asked++
+			return map[string]any{"schema_version": 1, "asked": asked}
+		}}
+	done := make(chan error, 1)
+	go func() { done <- c.session(ctx) }()
+	for i := 1; i <= 2; i++ {
+		select {
+		case payload := <-received:
+			if !strings.Contains(payload, `"schema_version":1`) {
+				t.Fatalf("inventory %d: %s", i, payload)
+			}
+		case err := <-failure:
+			t.Fatal(err)
+		case <-ctx.Done():
+			t.Fatalf("inventory %d never arrived", i)
+		}
+	}
+	cancel()
+	<-done
+}

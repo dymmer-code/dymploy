@@ -489,6 +489,12 @@ The existing local repository/ref/installation policy still applies. Queue limit
 container resources, secret commands, runner settings and retention cannot be changed
 through this connection. Target changes require a restart when the control plane is enabled.
 
+Once connected, and every ten minutes, dymploy tells the control plane what it can do (the `inventory` event): its
+`ssh` and `s3` targets (name, user, port, whether they have a secret source, and the addresses their host resolves to) and
+the repositories that may deploy to them, with the branches and, when the GitHub App is configured, the installation that
+covers each one. It carries no key, path or secret and grants nothing: the control plane can only choose among those
+targets, and every definition still has to be accepted locally.
+
 Review each downloaded app definition and accept its exact digest locally:
 
 ```sh

@@ -107,7 +107,10 @@ func newServeCmd(version string) *cobra.Command {
 					},
 				}
 				enq.WithScope(service.Associate)
-				client := &controlplane.Client{URL: cfg.ControlPlane.URL, TokenFile: cfg.ControlPlane.TokenFile, Service: service, Log: log}
+				client := &controlplane.Client{URL: cfg.ControlPlane.URL, TokenFile: cfg.ControlPlane.TokenFile, Service: service, Log: log,
+					Inventory: func(ctx context.Context) any {
+						return controlplane.BuildInventory(ctx, cfg, installationResolver(providers), nil)
+					}}
 				linkCtx, stopLink := context.WithCancel(ctx)
 				defer stopLink()
 				go client.Run(linkCtx)
@@ -402,6 +405,16 @@ func runEvery(ctx context.Context, interval time.Duration, f func()) {
 		case <-tick.C:
 			f()
 		}
+	}
+}
+
+// installationResolver gives the installation of a provider's App that covers a repository, for the providers that have one.
+func installationResolver(providers map[string]provider.Provider) controlplane.InstallationResolver {
+	return func(ctx context.Context, name, owner, repo string) (int64, error) {
+		if p, ok := providers[name].(*github.Provider); ok {
+			return p.InstallationID(ctx, owner, repo)
+		}
+		return 0, fmt.Errorf("%s has no App to ask", name)
 	}
 }
 
