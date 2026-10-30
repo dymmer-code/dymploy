@@ -27,15 +27,18 @@ type Repository struct {
 	InstallationIDs []int64  `json:"installation_ids"`
 }
 type Target struct {
-	Name          string `json:"name"`
-	HostID        string `json:"host_id"`
-	Host          string `json:"host"`
-	Port          int    `json:"port"`
-	User          string `json:"user"`
-	UploadDir     string `json:"upload_dir"`
-	SSHKeyRef     string `json:"ssh_key_ref"`
-	KnownHostsRef string `json:"known_hosts_ref"`
-	SecretsRef    string `json:"secrets_ref"`
+	Name   string `json:"name"`
+	HostID string `json:"host_id"`
+	Host   string `json:"host"`
+	Port   int    `json:"port"`
+	User   string `json:"user"`
+	// Addresses are those the control plane has for the host. They let the host be recognised as the machine of the local
+	// catalogue even when the control plane writes its name differently (see CheckLocal).
+	Addresses     []string `json:"addresses,omitempty"`
+	UploadDir     string   `json:"upload_dir"`
+	SSHKeyRef     string   `json:"ssh_key_ref"`
+	KnownHostsRef string   `json:"known_hosts_ref"`
+	SecretsRef    string   `json:"secrets_ref"`
 }
 type Application struct {
 	ID          string     `json:"id"`

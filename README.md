@@ -483,7 +483,11 @@ never the URL. Rotating the token file takes effect on the next connection.
 
 Dymmer supplies app definitions, not executable local configuration. The target name,
 host, SSH port, user, upload directory and credential references must agree with the
-existing local `targets` catalogue. `ssh_keys` and `known_hosts` map opaque references to
+existing local `targets` catalogue. A port or upload directory left out means the default
+one (22, `dymploy-uploads`) on either side, and the host is the same when the text is the
+same or, if the definition lists the addresses the control plane has for it, when one of
+them is among those the local host resolves to. The catalogue still decides where a target
+connects; this is a consistency check on what is accepted. `ssh_keys` and `known_hosts` map opaque references to
 local paths. A nonempty `secrets_ref` must map to that target's existing secret source.
 The existing local repository/ref/installation policy still applies. Queue limits,
 container resources, secret commands, runner settings and retention cannot be changed
