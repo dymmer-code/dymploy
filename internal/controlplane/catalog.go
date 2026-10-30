@@ -49,7 +49,13 @@ type Application struct {
 	Targets     []Target   `json:"targets"`
 }
 
+// Digest is what a person accepts. The addresses of a host are left out: they come from a daemon that reports them as they
+// change, and they only help to recognise the machine, so a new one must not take back an approval.
 func (a Application) Digest() string {
+	a.Targets = slices.Clone(a.Targets)
+	for i := range a.Targets {
+		a.Targets[i].Addresses = nil
+	}
 	b, _ := json.Marshal(a)
 	sum := sha256.Sum256(b)
 	return hex.EncodeToString(sum[:])

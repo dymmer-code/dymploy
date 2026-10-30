@@ -110,3 +110,18 @@ func TestTheHostIsRecognisedByAddressWhenTheNameIsNotTheSame(t *testing.T) {
 		t.Fatal("another user was accepted")
 	}
 }
+
+func TestTheAddressesOfAHostDoNotChangeWhatWasAccepted(t *testing.T) {
+	a := definition(Target{Host: "rowan", User: "deploy"})
+	b := definition(Target{Host: "rowan", User: "deploy", Addresses: []string{"192.0.2.57"}})
+	if a.Digest() != b.Digest() {
+		t.Fatal("the digest changed with the addresses")
+	}
+	if b.Targets[0].Addresses == nil {
+		t.Fatal("the digest cleared the addresses of the definition")
+	}
+	b.Targets[0].User = "root"
+	if a.Digest() == b.Digest() {
+		t.Fatal("the digest ignores the user")
+	}
+}
