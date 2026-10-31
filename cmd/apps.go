@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"fmt"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/dymmer-code/dymploy/internal/config"
@@ -17,7 +18,8 @@ func appCatalog(cfg *config.Config) controlplane.Catalog {
 func newAppsCmd() *cobra.Command {
 	root := &cobra.Command{Use: "apps", Short: "Review, accept and revoke Dymmer applications locally"}
 	for _, action := range []string{"list", "accept", "revoke"} {
-		var path, digest string
+		var path string
+		var expect expectation
 		cmd := &cobra.Command{Use: action, Args: cobra.NoArgs}
 		if action != "list" {
 			cmd.Use += " APP_ID"
@@ -45,13 +47,14 @@ func newAppsCmd() *cobra.Command {
 						if err := controlplane.CheckLocal(cfg, a); err != nil {
 							return err
 						}
-						if digest == "" {
-							if err := confirmAcceptance(c, a); err != nil {
+						if expect.stated(c) {
+							if err := expect.matches(a); err != nil {
 								return err
 							}
-							digest = a.Digest()
+						} else if err := confirmAcceptance(c, a); err != nil {
+							return err
 						}
-						return catalog.Accept(a.ID, digest)
+						return catalog.Accept(a.ID, a.Digest())
 					}
 				}
 				return controlplane.ErrPending
@@ -70,7 +73,7 @@ func newAppsCmd() *cobra.Command {
 		}
 		configFlag(cmd, &path)
 		if action == "accept" {
-			cmd.Flags().StringVar(&digest, "digest", "", "digest of a definition already reviewed (from apps list): accepts exactly that one without asking, for scripts")
+			expect.flags(cmd)
 		}
 		root.AddCommand(cmd)
 	}
@@ -107,7 +110,7 @@ func acceptanceItems(a controlplane.Application) []string {
 }
 
 // confirmAcceptance asks about each element the application asks for and accepts only if every answer is an explicit yes.
-// Anything else (no input, a script without --digest) leaves the application pending: nothing is written.
+// Anything else (no input, a script that states no expectation) leaves the application pending: nothing is written.
 func confirmAcceptance(c *cobra.Command, a controlplane.Application) error {
 	out := c.OutOrStdout()
 	in := bufio.NewReader(c.InOrStdin())
@@ -117,8 +120,63 @@ func confirmAcceptance(c *cobra.Command, a controlplane.Application) error {
 		answer, _ := in.ReadString('\n')
 		if answer = strings.ToLower(strings.TrimSpace(answer)); answer != "y" && answer != "yes" {
 			fmt.Fprintln(out)
-			return fmt.Errorf("not accepted: nothing changed (a reviewed digest accepts without asking: --digest)")
+			return fmt.Errorf("not accepted: nothing changed (a script states what it expects with --repository, --branch, --tag, --environment and --target)")
 		}
+	}
+	return nil
+}
+
+// expectation is what a script says it has reviewed. Every element must be stated and must be exactly what the
+// application asks for: a missing, extra or different one refuses, and nothing is written.
+type expectation struct {
+	repository  string
+	branches    []string
+	tags        []string
+	environment string
+	targets     []string
+}
+
+func (e *expectation) flags(cmd *cobra.Command) {
+	f := cmd.Flags()
+	f.StringVar(&e.repository, "repository", "", "expected repository, provider/owner/name (with these flags nothing is asked)")
+	f.StringSliceVar(&e.branches, "branch", nil, "expected branch (repeat for each one)")
+	f.StringSliceVar(&e.tags, "tag", nil, "expected tag (repeat for each one)")
+	f.StringVar(&e.environment, "environment", "", "expected environment")
+	f.StringSliceVar(&e.targets, "target", nil, "expected destination name (repeat for each one)")
+}
+
+func (e *expectation) stated(c *cobra.Command) bool {
+	for _, name := range []string{"repository", "branch", "tag", "environment", "target"} {
+		if c.Flags().Changed(name) {
+			return true
+		}
+	}
+	return false
+}
+
+func (e *expectation) matches(a controlplane.Application) error {
+	var diff []string
+	check := func(what string, asked, stated []string) {
+		asked, stated = slices.Clone(asked), slices.Clone(stated)
+		slices.Sort(asked)
+		slices.Sort(stated)
+		if !slices.Equal(asked, stated) {
+			diff = append(diff, fmt.Sprintf("%s: the application asks for [%s], you stated [%s]", what, strings.Join(asked, " "), strings.Join(stated, " ")))
+		}
+	}
+	nonEmpty := func(s string) []string {
+		if s == "" {
+			return nil
+		}
+		return []string{s}
+	}
+	check("repository", []string{a.RepositoryName()}, nonEmpty(e.repository))
+	check("branches", a.Repository.Branches, e.branches)
+	check("tags", a.Repository.Tags, e.tags)
+	check("environment", nonEmpty(a.Environment), nonEmpty(e.environment))
+	check("destinations", a.TargetNames(), e.targets)
+	if len(diff) > 0 {
+		return fmt.Errorf("not accepted: nothing changed\n  %s", strings.Join(diff, "\n  "))
 	}
 	return nil
 }

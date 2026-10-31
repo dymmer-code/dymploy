@@ -501,14 +501,15 @@ targets, and every definition still has to be accepted locally.
 
 Review each downloaded app definition and accept it locally. `dymploy apps accept APP_UUID` is the command for a
 person: it asks about each thing the application wants to do (the repository, its branches or tags, the environment, and
-every destination with its user, host and directory) and accepts only if every answer is an explicit `y`. With
-`--digest` (taken from `apps list`) it accepts exactly that already reviewed definition without asking: that form is for
-scripts.
+every destination with its user, host and directory) and accepts only if every answer is an explicit `y`.
+
+A script says what it has reviewed with flags instead; nothing is asked, and every element must be stated and match
+what the application asks for exactly (a missing, extra or different one refuses and writes nothing):
 
 ```sh
 dymploy apps list
 dymploy apps accept APP_UUID
-dymploy apps accept APP_UUID --digest DIGEST_FROM_LIST
+dymploy apps accept APP_UUID --repository github/acme/app --branch main --environment prod --target rowan-app
 dymploy apps revoke APP_UUID
 ```
 

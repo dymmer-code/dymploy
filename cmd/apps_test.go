@@ -34,10 +34,10 @@ func TestAppsCLIReviewAcceptAndRevoke(t *testing.T) {
 	if err != nil || !strings.Contains(out, a.Digest()) {
 		t.Fatal(out, err)
 	}
-	if _, _, err := run(t, ctx, "apps", "accept", "app", "--digest", "old", "--config", path); err == nil {
-		t.Fatal("stale digest")
+	if _, _, err := run(t, ctx, "apps", "accept", "app", "--repository", "github/acme/other", "--config", path); err == nil {
+		t.Fatal("a different repository accepted")
 	}
-	if _, _, err := run(t, ctx, "apps", "accept", "app", "--digest", a.Digest(), "--config", path); err != nil {
+	if _, _, err := run(t, ctx, "apps", "accept", "app", "--repository", "github/acme/app", "--config", path); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := cat.Accepted("app"); err != nil {
@@ -72,7 +72,7 @@ func TestAppsCLIReviewAcceptAndRevoke(t *testing.T) {
 	if _, err := cat.Accepted("app"); err == nil {
 		t.Fatal("not revoked")
 	}
-	if _, _, err := run(t, ctx, "apps", "accept", "missing", "--digest", a.Digest(), "--config", path); err == nil {
+	if _, _, err := run(t, ctx, "apps", "accept", "missing", "--repository", "github/acme/app", "--config", path); err == nil {
 		t.Fatal("missing accepted")
 	}
 	a.Targets = []controlplane.Target{{Name: "unconfigured"}}
@@ -83,7 +83,7 @@ func TestAppsCLIReviewAcceptAndRevoke(t *testing.T) {
 	if err != nil || !strings.Contains(out, "differs from the local catalogue") {
 		t.Fatal(out, err)
 	}
-	if _, _, err := run(t, ctx, "apps", "accept", "app", "--digest", a.Digest(), "--config", path); err == nil {
+	if _, _, err := run(t, ctx, "apps", "accept", "app", "--repository", "github/acme/app", "--target", "unconfigured", "--config", path); err == nil {
 		t.Fatal("unconfigured target accepted")
 	}
 	disabled := writeConfig(t, tmpDir(t))
@@ -109,6 +109,27 @@ func TestAcceptanceAsksAboutEachElementAndEveryAnswerMustBeYes(t *testing.T) {
 	for _, want := range []string{"github/acme/app", "main", "prod", "rowan-app (deploy-app@10.0.0.5:22)"} {
 		if !strings.Contains(strings.Join(items, "\n"), want) {
 			t.Fatal(want, items)
+		}
+	}
+}
+
+func TestAnExpectationMustStateEveryElementExactly(t *testing.T) {
+	a := controlplane.Application{ID: "app", Environment: "prod",
+		Repository: controlplane.Repository{Provider: "github", Owner: "acme", Name: "app", Branches: []string{"main", "release"}},
+		Targets:    []controlplane.Target{{Name: "rowan-app"}}}
+	ok := expectation{repository: "github/acme/app", branches: []string{"release", "main"}, environment: "prod", targets: []string{"rowan-app"}}
+	if err := ok.matches(a); err != nil {
+		t.Fatal(err)
+	}
+	for name, e := range map[string]expectation{
+		"missing branch":    {repository: ok.repository, branches: []string{"main"}, environment: "prod", targets: ok.targets},
+		"extra tag":         {repository: ok.repository, branches: ok.branches, tags: []string{"v1"}, environment: "prod", targets: ok.targets},
+		"no environment":    {repository: ok.repository, branches: ok.branches, targets: ok.targets},
+		"other destination": {repository: ok.repository, branches: ok.branches, environment: "prod", targets: []string{"other"}},
+		"no repository":     {branches: ok.branches, environment: "prod", targets: ok.targets},
+	} {
+		if err := e.matches(a); err == nil {
+			t.Fatal(name, "accepted")
 		}
 	}
 }
