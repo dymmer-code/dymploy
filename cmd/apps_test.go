@@ -56,8 +56,11 @@ func TestAppsCLIReviewAcceptAndRevoke(t *testing.T) {
 	if _, err := cat.Accepted("app"); err == nil {
 		t.Fatal("accepted without an answer")
 	}
+	if _, _, err := runWithInput(t, ctx, "n\n", "apps", "accept", "app", "--config", path); err == nil {
+		t.Fatal("accepted after a no")
+	}
 	out, _, err = runWithInput(t, ctx, "y\n", "apps", "accept", "app", "--config", path)
-	if err != nil || !strings.Contains(out, a.Digest()) {
+	if err != nil || !strings.Contains(out, "acme/app") {
 		t.Fatal(out, err)
 	}
 	if _, err := cat.Accepted("app"); err != nil {
@@ -92,5 +95,20 @@ func TestAppsCLIReviewAcceptAndRevoke(t *testing.T) {
 func TestAppsCLIReportsAnUnreadableConfiguration(t *testing.T) {
 	if _, _, err := run(t, context.Background(), "apps", "list", "--config", tmpDir(t)+"/missing.yaml"); err == nil {
 		t.Fatal("missing configuration accepted")
+	}
+}
+
+func TestAcceptanceAsksAboutEachElementAndEveryAnswerMustBeYes(t *testing.T) {
+	a := controlplane.Application{ID: "app", Environment: "prod",
+		Repository: controlplane.Repository{Provider: "github", Owner: "acme", Name: "app", Branches: []string{"main"}},
+		Targets:    []controlplane.Target{{Name: "rowan-app", User: "deploy-app", Host: "10.0.0.5", Port: 22, SecretsRef: "rowan-app"}}}
+	items := acceptanceItems(a)
+	if len(items) != 4 {
+		t.Fatal(items)
+	}
+	for _, want := range []string{"github/acme/app", "main", "prod", "rowan-app (deploy-app@10.0.0.5:22)"} {
+		if !strings.Contains(strings.Join(items, "\n"), want) {
+			t.Fatal(want, items)
+		}
 	}
 }

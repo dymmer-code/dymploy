@@ -499,9 +499,11 @@ the repositories that may deploy to them, with the branches and, when the GitHub
 covers each one. It carries no key, path or secret and grants nothing: the control plane can only choose among those
 targets, and every definition still has to be accepted locally.
 
-Review each downloaded app definition and accept it locally. Without `--digest` the command prints what the
-application asks for and its digest, and accepts only an explicit `y`; with `--digest` (taken from `apps list`) it
-accepts exactly that reviewed definition without asking, which is the form for scripts:
+Review each downloaded app definition and accept it locally. `dymploy apps accept APP_UUID` is the command for a
+person: it asks about each thing the application wants to do (the repository, its branches or tags, the environment, and
+every destination with its user, host and directory) and accepts only if every answer is an explicit `y`. With
+`--digest` (taken from `apps list`) it accepts exactly that already reviewed definition without asking: that form is for
+scripts.
 
 ```sh
 dymploy apps list

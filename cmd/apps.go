@@ -70,24 +70,55 @@ func newAppsCmd() *cobra.Command {
 		}
 		configFlag(cmd, &path)
 		if action == "accept" {
-			cmd.Flags().StringVar(&digest, "digest", "", "digest reviewed beforehand (from apps list): accepts exactly that definition without asking")
+			cmd.Flags().StringVar(&digest, "digest", "", "digest of a definition already reviewed (from apps list): accepts exactly that one without asking, for scripts")
 		}
 		root.AddCommand(cmd)
 	}
 	return root
 }
 
-// confirmAcceptance shows what the application asks for and its digest, and accepts only an explicit yes on the input.
-// Anything else (no input, a script without --digest) leaves the application pending.
+// acceptanceItems lists, in words, each thing an application asks to be allowed to do. A person answers for every one.
+func acceptanceItems(a controlplane.Application) []string {
+	items := []string{"Deploy the repository " + a.RepositoryName()}
+	if len(a.Repository.Branches) > 0 {
+		items = append(items, "From the branches: "+strings.Join(a.Repository.Branches, ", "))
+	}
+	if len(a.Repository.Tags) > 0 {
+		items = append(items, "From the tags: "+strings.Join(a.Repository.Tags, ", "))
+	}
+	if a.Environment != "" {
+		items = append(items, "For the environment: "+a.Environment)
+	}
+	for _, t := range a.Targets {
+		item := fmt.Sprintf("To the destination %s (%s@%s", t.Name, t.User, t.Host)
+		if t.Port != 0 {
+			item += fmt.Sprintf(":%d", t.Port)
+		}
+		item += ")"
+		if t.UploadDir != "" {
+			item += ", directory " + t.UploadDir
+		}
+		if t.SecretsRef != "" {
+			item += ", reading its secrets"
+		}
+		items = append(items, item)
+	}
+	return items
+}
+
+// confirmAcceptance asks about each element the application asks for and accepts only if every answer is an explicit yes.
+// Anything else (no input, a script without --digest) leaves the application pending: nothing is written.
 func confirmAcceptance(c *cobra.Command, a controlplane.Application) error {
 	out := c.OutOrStdout()
-	if err := printJSON(out, a); err != nil {
-		return err
-	}
-	fmt.Fprintf(out, "digest: %s\nAccept this definition? [y/N] ", a.Digest())
-	answer, _ := bufio.NewReader(c.InOrStdin()).ReadString('\n')
-	if answer = strings.ToLower(strings.TrimSpace(answer)); answer != "y" && answer != "yes" {
-		return fmt.Errorf("not accepted: nothing changed (use --digest to accept a reviewed definition without asking)")
+	in := bufio.NewReader(c.InOrStdin())
+	fmt.Fprintf(out, "Application %s asks to:\n", a.ID)
+	for _, item := range acceptanceItems(a) {
+		fmt.Fprintf(out, "  %s. Allow it? [y/N] ", item)
+		answer, _ := in.ReadString('\n')
+		if answer = strings.ToLower(strings.TrimSpace(answer)); answer != "y" && answer != "yes" {
+			fmt.Fprintln(out)
+			return fmt.Errorf("not accepted: nothing changed (a reviewed digest accepts without asking: --digest)")
+		}
 	}
 	return nil
 }
