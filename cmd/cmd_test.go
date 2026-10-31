@@ -48,8 +48,14 @@ import (
 
 func run(t *testing.T, ctx context.Context, args ...string) (stdout, stderr string, err error) {
 	t.Helper()
+	return runWithInput(t, ctx, "", args...)
+}
+
+func runWithInput(t *testing.T, ctx context.Context, input string, args ...string) (stdout, stderr string, err error) {
+	t.Helper()
 	root := NewRootCmd("v1.2.3")
 	var out, errb bytes.Buffer
+	root.SetIn(strings.NewReader(input))
 	root.SetOut(&out)
 	root.SetErr(&errb)
 	root.SetArgs(args)

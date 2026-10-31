@@ -499,10 +499,13 @@ the repositories that may deploy to them, with the branches and, when the GitHub
 covers each one. It carries no key, path or secret and grants nothing: the control plane can only choose among those
 targets, and every definition still has to be accepted locally.
 
-Review each downloaded app definition and accept its exact digest locally:
+Review each downloaded app definition and accept it locally. Without `--digest` the command prints what the
+application asks for and its digest, and accepts only an explicit `y`; with `--digest` (taken from `apps list`) it
+accepts exactly that reviewed definition without asking, which is the form for scripts:
 
 ```sh
 dymploy apps list
+dymploy apps accept APP_UUID
 dymploy apps accept APP_UUID --digest DIGEST_FROM_LIST
 dymploy apps revoke APP_UUID
 ```

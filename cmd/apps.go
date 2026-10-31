@@ -1,8 +1,10 @@
 package cmd
 
 import (
+	"bufio"
 	"fmt"
 	"path/filepath"
+	"strings"
 
 	"github.com/dymmer-code/dymploy/internal/config"
 	"github.com/dymmer-code/dymploy/internal/controlplane"
@@ -43,6 +45,12 @@ func newAppsCmd() *cobra.Command {
 						if err := controlplane.CheckLocal(cfg, a); err != nil {
 							return err
 						}
+						if digest == "" {
+							if err := confirmAcceptance(c, a); err != nil {
+								return err
+							}
+							digest = a.Digest()
+						}
 						return catalog.Accept(a.ID, digest)
 					}
 				}
@@ -62,10 +70,24 @@ func newAppsCmd() *cobra.Command {
 		}
 		configFlag(cmd, &path)
 		if action == "accept" {
-			cmd.Flags().StringVar(&digest, "digest", "", "reviewed application digest from apps list")
-			_ = cmd.MarkFlagRequired("digest")
+			cmd.Flags().StringVar(&digest, "digest", "", "digest reviewed beforehand (from apps list): accepts exactly that definition without asking")
 		}
 		root.AddCommand(cmd)
 	}
 	return root
+}
+
+// confirmAcceptance shows what the application asks for and its digest, and accepts only an explicit yes on the input.
+// Anything else (no input, a script without --digest) leaves the application pending.
+func confirmAcceptance(c *cobra.Command, a controlplane.Application) error {
+	out := c.OutOrStdout()
+	if err := printJSON(out, a); err != nil {
+		return err
+	}
+	fmt.Fprintf(out, "digest: %s\nAccept this definition? [y/N] ", a.Digest())
+	answer, _ := bufio.NewReader(c.InOrStdin()).ReadString('\n')
+	if answer = strings.ToLower(strings.TrimSpace(answer)); answer != "y" && answer != "yes" {
+		return fmt.Errorf("not accepted: nothing changed (use --digest to accept a reviewed definition without asking)")
+	}
+	return nil
 }

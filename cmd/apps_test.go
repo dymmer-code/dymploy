@@ -49,6 +49,26 @@ func TestAppsCLIReviewAcceptAndRevoke(t *testing.T) {
 	if _, err := cat.Accepted("app"); err == nil {
 		t.Fatal("not revoked")
 	}
+	// without a digest it asks: no answer or "n" leaves it pending, "y" accepts what it showed
+	if _, _, err := run(t, ctx, "apps", "accept", "app", "--config", path); err == nil {
+		t.Fatal("accepted without an answer")
+	}
+	if _, err := cat.Accepted("app"); err == nil {
+		t.Fatal("accepted without an answer")
+	}
+	out, _, err = runWithInput(t, ctx, "y\n", "apps", "accept", "app", "--config", path)
+	if err != nil || !strings.Contains(out, a.Digest()) {
+		t.Fatal(out, err)
+	}
+	if _, err := cat.Accepted("app"); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := run(t, ctx, "apps", "revoke", "app", "--config", path); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := cat.Accepted("app"); err == nil {
+		t.Fatal("not revoked")
+	}
 	if _, _, err := run(t, ctx, "apps", "accept", "missing", "--digest", a.Digest(), "--config", path); err == nil {
 		t.Fatal("missing accepted")
 	}
